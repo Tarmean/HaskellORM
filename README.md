@@ -35,7 +35,7 @@ The process goes:
 - Run the query builder monad. Each `nested` receives an identifier and is stashed into a Typeable map.
 - After the root query is run and executed, we can run the delayed children. The children receive a vector of rows.
 - The results are grouped by some key so we can retreive them given a parent row
-- Each query returns a Result which both generates the select statement and parses the result. They have access to all results, keyed by nested identifiers. `nested` generates a `Result` which retrieves the relevant rows and parses using these keys
+- Each query returns a Result which both generates the select statement and parses the result. They have access to all results, keyed by nested identifiers. `nested` generates a `Result` which retrieves the relevant child rows and parses them using these keys
 
 
 We can extend this to monadic profunctors. Each QueryM also serializes values into rows,  we diff rows to generate patches, and we apply patches to the database as insert/update/delete statements.
