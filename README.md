@@ -24,8 +24,8 @@ This builds on relational-query for the query building monad. We add nested quer
 Each `nested` adds an extra query, so we run roughly the following queries:
 
 ```SQL
-SELECT * FROM Customers
-SELECT customer_id, * FROM Account WHERE customer_id IN (?,?,?,...) 
+SELECT C.* FROM Customers C
+SELECT A.customer_id, A.* FROM Account A WHERE A.availBalance > 25000 AND A.customer_id IN (?,?,?,...) 
 ```
 
 The `cust.accounts` uses -XRecordDotSyntax to find the join metadata.
