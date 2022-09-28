@@ -1,0 +1,85 @@
+# This YAML file describes your package. Stack will automatically generate a
+# Cabal file when you run `stack build`. See the hpack website for help with
+# this file: <https://github.com/sol/hpack>.
+name: ORM
+version: '0.0.0'
+github: "githubuser/ORM"
+license: MIT
+author: "Author name here"
+maintainer: "Author name here"
+# synopsis: A new Haskeleton package.
+# description: ORM is a new Haskeleton package.
+# category: Other
+
+extra-source-files:
+- CHANGELOG.md
+- LICENSE.md
+- package.yaml
+- README.md
+- stack.yaml
+
+ghc-options: 
+  -Wall
+  -XGHC2021
+
+library:
+  dependencies:
+  - base
+  - containers
+  - mtl
+  - transformers
+  - text
+  - bytestring
+  - text
+  - ghc-prim
+  - megaparsec >= 9.2.0
+  - sql-words
+  - vector
+  - HDBC
+  - HDBC-session
+  - HDBC-sqlite3
+  - persistable-record
+  - relational-query
+  - relational-query-HDBC
+  - relational-schemas
+  - template-haskell
+  source-dirs: library
+
+executables:
+  ORM:
+    source-dirs: executable
+    main: Main.hs
+    dependencies:
+    - base
+    - ORM
+    ghc-options:
+    - -rtsopts
+    - -threaded
+    - -with-rtsopts=-N
+
+benchmarks:
+  ORM-benchmarks:
+    source-dirs: benchmark
+    main: Main.hs
+    dependencies:
+    - base
+    - ORM
+    - criterion
+    ghc-options:
+    - -rtsopts
+    - -threaded
+    - -with-rtsopts=-N
+
+tests:
+  ORM-test-suite:
+    source-dirs: test-suite
+    main: Main.hs
+    dependencies:
+    - base
+    - ORM
+    - tasty
+    - tasty-hspec
+    ghc-options:
+    - -rtsopts
+    - -threaded
+    - -with-rtsopts=-N

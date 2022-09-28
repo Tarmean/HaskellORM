@@ -1,0 +1,188 @@
+{-# LANGUAGE QuasiQuotes, TemplateHaskell, MultiParamTypeClasses, FlexibleInstances, DeriveGeneric, DataKinds #-}
+{-# LANGUAGE DuplicateRecordFields, DisambiguateRecordFields #-}
+module DB where
+
+
+
+
+
+    -- data Account
+    --   = Account {accountId :: !Int,
+    --              productCd :: !String,
+    --              custId :: !Int,
+    --              openDate :: !time-1.11.1.1:Data.Time.Calendar.Days.Day,
+    --              closeDate :: !(Maybe time-1.11.1.1:Data.Time.Calendar.Days.Day),
+    --              lastActivityDate :: !(Maybe time-1.11.1.1:Data.Time.Calendar.Days.Day),
+    --              status :: !String,
+    --              openBranchId :: !(Maybe Int),
+    --              openEmpId :: !(Maybe Int),
+    --              availBalance :: !(Maybe Double),
+    --              pendingBalance :: !(Maybe Double)}
+    --   deriving (Show, GHC.Generics.Generic)
+    -- columnOffsetsAccount :: GHC.Arr.Array Int Int
+    -- columnOffsetsAccount
+    --   = Database.Record.Persistable.getProductConst
+    --       (Database.Record.Persistable.genericFieldOffsets ::
+    --          Database.Record.Persistable.ProductConst (GHC.Arr.Array Int Int) Account)
+    -- instance Database.Record.Persistable.PersistableWidth Account
+    -- instance product-isomorphic-0.0.3.3-AnXW1MOXVFzBXTx2Dt2JEG:Data.Functor.ProductIsomorphic.Unsafe.ProductConstructor (Int
+    --                                                                                                                      -> String
+    --                                                                                                                         -> Int
+    --                                                                                                                            -> time-1.11.1.1:Data.Time.Calendar
+-- .Days.Day
+    --                                                                                                                               -> Maybe time-1.11.1.1:Data.Time
+-- .Calendar.Days.Day
+    --                                                                                                                                  -> Maybe time-1.11.1.1:Data.T
+-- ime.Calendar.Days.Day
+    --                                                                                                                                     -> String
+    --                                                                                                                                        -> Maybe Int
+    --                                                                                                                                           -> Maybe Int        
+    --                                                                                                                                              -> Maybe Double  
+    --                                                                                                                                                 -> Maybe Doubl
+-- e
+    --                                                                                                                                                    -> Account)
+ -- where
+    --   product-isomorphic-0.0.3.3-AnXW1MOXVFzBXTx2Dt2JEG:Data.Functor.ProductIsomorphic.Unsafe.productConstructor
+    --     = Account
+    -- instance Database.Relational.ProjectableClass.LiteralSQL Account
+    -- instance relational-query-0.12.2.3-77QHi1CGsaE7k85k3n8pw:Database.Relational.Typed.Table.TableDerivable Account where
+    --   relational-query-0.12.2.3-77QHi1CGsaE7k85k3n8pw:Database.Relational.Typed.Table.derivedTable
+    --     = (relational-query-0.12.2.3-77QHi1CGsaE7k85k3n8pw:Database.Relational.Typed.Table.table
+    --          "MAIN.account")
+    --         ["account_id", "product_cd", "cust_id", "open_date", "close_date",
+    --          "last_activity_date", "status", "open_branch_id", "open_emp_id",
+    --          "avail_balance", "pending_balance"]
+    -- tableOfAccount ::
+    --   relational-query-0.12.2.3-77QHi1CGsaE7k85k3n8pw:Database.Relational.Typed.Table.Table Account
+    -- tableOfAccount
+    --   = relational-query-0.12.2.3-77QHi1CGsaE7k85k3n8pw:Database.Relational.Typed.Table.derivedTable
+    -- account :: Database.Relational.Monad.BaseType.Relation () Account
+    -- account = Database.Relational.Relation.derivedRelation
+    -- insertAccount :: Database.Relational.SQL.Insert Account
+    -- insertAccount
+    --   = Database.Relational.SQL.insert Database.Relational.Pi.id'
+    -- insertQueryAccount ::
+    --   forall p_aeGe. Database.Relational.Monad.BaseType.Relation p_aeGe Account
+    --                  -> Database.Relational.SQL.InsertQuery p_aeGe
+    -- insertQueryAccount
+    --   = Database.Relational.SQL.insertQuery Database.Relational.Pi.id'
+    -- accountId' :: Database.Relational.Pi.Unsafe.Pi Account Int
+    -- accountId'
+    --   = (Database.Relational.Pi.Unsafe.definePi
+    --        $ (columnOffsetsAccount array-0.5.4.0:Data.Array.Base.! 0))
+    -- productCd' :: Database.Relational.Pi.Unsafe.Pi Account String
+    -- productCd'
+    --   = (Database.Relational.Pi.Unsafe.definePi
+    --        $ (columnOffsetsAccount array-0.5.4.0:Data.Array.Base.! 1))
+    -- custId' :: Database.Relational.Pi.Unsafe.Pi Account Int
+    -- custId'
+    --   = (Database.Relational.Pi.Unsafe.definePi
+    --        $ (columnOffsetsAccount array-0.5.4.0:Data.Array.Base.! 2))
+    -- openDate' ::
+    --   Database.Relational.Pi.Unsafe.Pi Account time-1.11.1.1:Data.Time.Calendar.Days.Day
+    -- openDate'
+    --   = (Database.Relational.Pi.Unsafe.definePi
+    --        $ (columnOffsetsAccount array-0.5.4.0:Data.Array.Base.! 3))
+    -- closeDate' ::
+    --   Database.Relational.Pi.Unsafe.Pi Account (Maybe time-1.11.1.1:Data.Time.Calendar.Days.Day)
+    -- closeDate'
+    --   = (Database.Relational.Pi.Unsafe.definePi
+    --        $ (columnOffsetsAccount array-0.5.4.0:Data.Array.Base.! 4))
+    -- lastActivityDate' ::
+    --   Database.Relational.Pi.Unsafe.Pi Account (Maybe time-1.11.1.1:Data.Time.Calendar.Days.Day)
+    -- lastActivityDate'
+    --   = (Database.Relational.Pi.Unsafe.definePi
+    --        $ (columnOffsetsAccount array-0.5.4.0:Data.Array.Base.! 5))
+    -- status' :: Database.Relational.Pi.Unsafe.Pi Account String
+    -- status'
+    --   = (Database.Relational.Pi.Unsafe.definePi
+    --        $ (columnOffsetsAccount array-0.5.4.0:Data.Array.Base.! 6))
+    -- openBranchId' ::
+    --   Database.Relational.Pi.Unsafe.Pi Account (Maybe Int)
+    -- openBranchId'
+    --   = (Database.Relational.Pi.Unsafe.definePi
+    --        $ (columnOffsetsAccount array-0.5.4.0:Data.Array.Base.! 7))
+    -- openEmpId' :: Database.Relational.Pi.Unsafe.Pi Account (Maybe Int)
+    -- openEmpId'
+    --   = (Database.Relational.Pi.Unsafe.definePi
+    --        $ (columnOffsetsAccount array-0.5.4.0:Data.Array.Base.! 8))
+    -- availBalance' ::
+    --   Database.Relational.Pi.Unsafe.Pi Account (Maybe Double)
+    -- availBalance'
+    --   = (Database.Relational.Pi.Unsafe.definePi
+    --        $ (columnOffsetsAccount array-0.5.4.0:Data.Array.Base.! 9))
+    -- pendingBalance' ::
+    --   Database.Relational.Pi.Unsafe.Pi Account (Maybe Double)
+    -- pendingBalance'
+    --   = (Database.Relational.Pi.Unsafe.definePi
+    --        $ (columnOffsetsAccount array-0.5.4.0:Data.Array.Base.! 10))
+    -- instance Database.Relational.OverloadedProjection.HasProjection "accountId" Account Int where
+    --   Database.Relational.OverloadedProjection.projection _
+    --     = (Database.Relational.Pi.Unsafe.definePi
+    --          $ (columnOffsetsAccount GHC.Arr.! 0))
+    -- instance Database.Relational.OverloadedProjection.HasProjection "productCd" Account String where
+    --   Database.Relational.OverloadedProjection.projection _
+    --     = (Database.Relational.Pi.Unsafe.definePi
+    --          $ (columnOffsetsAccount GHC.Arr.! 1))
+    -- instance Database.Relational.OverloadedProjection.HasProjection "custId" Account Int where
+    --   Database.Relational.OverloadedProjection.projection _
+    --     = (Database.Relational.Pi.Unsafe.definePi
+    --          $ (columnOffsetsAccount GHC.Arr.! 2))
+    -- instance Database.Relational.OverloadedProjection.HasProjection "openDate" Account time-1.11.1.1:Data.Time.Calendar.Days.Day where
+    --   Database.Relational.OverloadedProjection.projection _
+    --     = (Database.Relational.Pi.Unsafe.definePi
+    --          $ (columnOffsetsAccount GHC.Arr.! 3))
+    -- instance Database.Relational.OverloadedProjection.HasProjection "closeDate" Account (Maybe time-1.11.1.1:Data.Time.Calendar.Days.Day) where
+    --   Database.Relational.OverloadedProjection.projection _
+    --     = (Database.Relational.Pi.Unsafe.definePi
+    --          $ (columnOffsetsAccount GHC.Arr.! 4))
+    -- instance Database.Relational.OverloadedProjection.HasProjection "lastActivityDate" Account (Maybe time-1.11.1.1:Data.Time.Calendar.Days.Day) where
+    --   Database.Relational.OverloadedProjection.projection _
+    --     = (Database.Relational.Pi.Unsafe.definePi
+    --          $ (columnOffsetsAccount GHC.Arr.! 5))
+    -- instance Database.Relational.OverloadedProjection.HasProjection "status" Account String where
+    --   Database.Relational.OverloadedProjection.projection _
+    --     = (Database.Relational.Pi.Unsafe.definePi
+    --          $ (columnOffsetsAccount GHC.Arr.! 6))
+    -- instance Database.Relational.OverloadedProjection.HasProjection "openBranchId" Account (Maybe Int) where
+    --   Database.Relational.OverloadedProjection.projection _
+    --     = (Database.Relational.Pi.Unsafe.definePi
+    --          $ (columnOffsetsAccount GHC.Arr.! 7))
+    -- instance Database.Relational.OverloadedProjection.HasProjection "openEmpId" Account (Maybe Int) where
+    --   Database.Relational.OverloadedProjection.projection _
+    --     = (Database.Relational.Pi.Unsafe.definePi
+    --          $ (columnOffsetsAccount GHC.Arr.! 8))
+    -- instance Database.Relational.OverloadedProjection.HasProjection "availBalance" Account (Maybe Double) where
+    --   Database.Relational.OverloadedProjection.projection _
+    --     = (Database.Relational.Pi.Unsafe.definePi
+    --          $ (columnOffsetsAccount GHC.Arr.! 9))
+    -- instance Database.Relational.OverloadedProjection.HasProjection "pendingBalance" Account (Maybe Double) where
+    --   Database.Relational.OverloadedProjection.projection _
+    --     = (Database.Relational.Pi.Unsafe.definePi
+    --          $ (columnOffsetsAccount GHC.Arr.! 10))
+    -- instance Database.Record.KeyConstraint.HasColumnConstraint Database.Record.KeyConstraint.Primary Account where
+    --   Database.Record.KeyConstraint.columnConstraint
+    --     = Database.Record.KeyConstraint.unsafeSpecifyColumnConstraint 0
+    -- instance Database.Record.KeyConstraint.HasKeyConstraint Database.Record.KeyConstraint.Primary Account where
+    --   Database.Record.KeyConstraint.keyConstraint
+    --     = Database.Record.KeyConstraint.derivedCompositePrimary
+    -- instance Database.Relational.Constraint.HasConstraintKey Database.Record.KeyConstraint.Primary Account Int where
+    --   Database.Relational.Constraint.constraintKey
+    --     = Database.Relational.Constraint.unsafeDefineConstraintKey [0]
+    -- instance Database.Relational.OverloadedProjection.HasProjection "primary" Account Int where
+    --   Database.Relational.OverloadedProjection.projection _
+    --     = (Database.Relational.Constraint.projectionKey
+    --          $ Database.Relational.Constraint.unsafeDefineConstraintKey [0])
+    -- selectAccount :: Database.Relational.SQL.Query Int Account
+    -- selectAccount
+    --   = Database.Relational.SQL.relationalQuery
+    --       (Database.Relational.Derives.primarySelect account)
+    -- updateAccount :: Database.Relational.SQL.KeyUpdate Int Account
+    -- updateAccount
+    --   = Database.Relational.Derives.primaryUpdate tableOfAccount
+    -- instance Database.Record.KeyConstraint.HasColumnConstraint Database.Record.KeyConstraint.NotNull Account where
+    --   Database.Record.KeyConstraint.columnConstraint
+    --     = Database.Record.KeyConstraint.unsafeSpecifyColumnConstraint 0
+    -- instance Database.Record.FromSql.FromSql Database.HDBC.SqlValue.SqlValue Account
+    -- instance Database.Record.ToSql.ToSql Database.HDBC.SqlValue.SqlValue Account
+-- Ok, two modules loaded.
