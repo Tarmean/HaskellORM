@@ -28,7 +28,7 @@ SELECT C.* FROM Customers C
 SELECT A.customer_id, A.* FROM Account A WHERE A.availBalance > 25000 AND A.customer_id IN (?,?,?,...) 
 ```
 
-The `cust.accounts` uses -XRecordDotSyntax to find the join metadata.
+The `cust.accounts` uses -XRecordDotSyntax to resolve the join metadata, but there is no real field.
 
 The process goes:
 
