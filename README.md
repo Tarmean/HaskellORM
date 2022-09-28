@@ -38,4 +38,4 @@ The process goes:
 - Each query returns a Result which both generates the select statement and parses the result. They have access to all results, keyed by nested identifiers. `nested` generates a `Result` which retrieves the relevant child rows and parses them using these keys
 
 
-We can extend this to monadic profunctors. Each QueryM also serializes values into rows,  we diff rows to generate patches, and we apply patches to the database as insert/update/delete statements.
+We can extend this to monadic profunctors. Each QueryM also is a serializer to turn values into rows,  we diff rows to generate patches, and we apply patches to the database as insert/update/delete statements.
