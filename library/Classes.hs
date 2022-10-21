@@ -31,7 +31,8 @@ import Control.Monad.Reader
 import Data.Maybe (fromJust)
 
 import Database.Relational.OverloadedInstances ()
-import qualified Entity.Individual as EI
+import Entity.Customer
+import Entity.Account
 import qualified Database.Relational.Monad.BaseType
 import Data.Functor.Const
 import Control.Monad.Identity
@@ -40,6 +41,7 @@ import GHC.Generics (type (:*:) (..))
 import qualified Database.Relational.Monad.Trans.Ordering as SQL
 import qualified Database.Relational.Monad.Trans.Restricting as SQL
 import qualified Database.Relational.Monad.Trans.Join as SQL
+import qualified Database.Relational.Monad.Trans.Aggregating as SQL
 import qualified Database.Relational.Monad.Simple as SQL
 import qualified Database.Custom.IBMDB2 as SQL
 import qualified Database.Relational.Monad.Simple as SQL
@@ -62,8 +64,16 @@ import qualified Database.Relational.OverloadedProjection as SQLOP
 import Data.Functor.Identity
 import qualified Entity.Entities
 import GHC.Types (Symbol, Type)
-foo :: Database.Relational.Monad.BaseType.Relation () EI.Individual
-foo = EI.individual
+
+testQ = asRoot $ do
+    acc <- SQL.query account
+    custs <- mkJoin acc.customer $ \customer ->
+       pure (sel customer)
+    SQL.wheres $ acc.availBalance SQL..>. SQL.value (Just (25000::Double))
+    pure $ do
+        ac <- sel acc
+        cust <- custs
+        pure (ac, cust)
 
 class FundepHack a b c | a b -> c
 instance FundepHack a b c => FundepHack a b c
@@ -72,7 +82,7 @@ class (FundepHack l b c) => ORMField (l::Symbol) b c where
 instance (FundepHack l b c, SQLP.PersistableWidth a, SQLOP.HasProjection l a b) => ORMField l a (Record.Record SQL.Flat b) where
     ormField r = r SQL.! SQLOP.projection @l undefined
 
-instance (x ~ (JoinConfig Int Singular)) => ORMField "customer" Account x where
+instance (x ~ (JoinConfig Int Customer Singular)) => ORMField "customer" Account x where
     ormField r = JoinConfig {joinKeyR = #custId, joinTarget = customer, joinFinalizer = singular, joinOrigin = r.custId  }
 
 instance (AccountField l b, FundepHack l Account b, ORMField l Account b) => HasField l (Record.Record SQL.Flat Account) b where
@@ -91,9 +101,10 @@ type family AccountField (l :: Symbol) b where
     
 
 
-type QueryT f = SQL.Orderings f (SQL.Restrictings f (SQL.QueryJoin  SQL.ConfigureQuery))
+type QueryT = SQL.Orderings SQL.Flat SQL.QueryCore
+type AggQueryT = SQL.Orderings SQL.Aggregated (SQL.Restrictings SQL.Aggregated (SQL.AggregatingSetT SQL.QueryCore))
 
-toSubQuery :: (x -> SQL.Tuple) -> QueryT SQL.Flat (x, Result a)        -- ^ 'SimpleQuery'' to run
+toSubQuery :: (x -> SQL.Tuple) -> QueryT (x, Result a)        -- ^ 'SimpleQuery'' to run
            -> SQL.ConfigureQuery (x, SQL.SubQuery, RowParser a) -- ^ Result 'SubQuery' with 'Qualify' computation
 toSubQuery toTups q = do
    (((((x, res), ot), rs), pd), da) <- (extract q)
@@ -141,6 +152,23 @@ mkJoin cfg parse = do
         SQL.wheres $ SQL.in' key (SQL.values  row)
         childKey <- resultToRowParser (sel key)
         fmap (childKey,) (parse child)
+
+-- M.Map PId (M.Map CId Row)
+type UnParse r = ReaderT r (Const [(SQL.Column, SQLV.SqlValue)])
+
+class QueryOut m where
+    qsel :: (HasCallStack, SQLV.FromSql SQLV.SqlValue a, SQLP.PersistableWidth a) => Record.Record c a -> m a
+    qref :: Result a -> m a
+instance QueryOut Result where
+    qsel = sel
+    qref = id
+class ToSqlList a where
+    toSqlList :: a -> [SQLV.SqlValue]
+instance ToSqlList r => QueryOut (UnParse r) where
+    qsel r = ReaderT $ \s -> Const (zip (Record.untype r) (toSqlList s))
+
+class ExecInsert r where
+    execInsert :: r -> [(SQL.Column, SQLV.SqlValue)] -> IO Int
 nested :: (Typeable a, Typeable k, Ord k) => (Result k) -> ([k] -> QueryM SQL.Flat (RowParser k, Result a)) -> QueryM m (Result [a])
 nested parentKey cb = do
    qid <- genQId
@@ -194,10 +222,10 @@ sel rec
     r off v = SQLV.toRecord $ V.toList (sliceVector off wid v)
 -- nested :: (V.Vector Row  -> QueryM (Result b)) -> QKey [b]
 -- localResult :: Result a -> QueryM f (RowParser a)
-newtype QueryM f a = QueryM { unQueryM :: StateT QueryState (QueryT f) a }
+newtype QueryM f a = QueryM { unQueryM :: StateT QueryState (QueryT) a }
   deriving (Functor, Applicative, Monad, MonadState QueryState)
-instance MonadRestrict f (QueryM f) where
-   restrict p = QueryM (lift $ restrict p)
+instance MonadRestrict SQL.Flat (QueryM SQL.Flat) where
+   restrict p = QueryM (lift $ SQL.restrict p)
 instance  MonadQualify SQL.ConfigureQuery (QueryM f) where
    liftQualify p = QueryM (lift $ liftQualify p)
 instance  MonadQuery (QueryM f) where
@@ -208,7 +236,7 @@ instance  MonadQuery (QueryM f) where
 -- instance  MonadPartition f (QueryM f) where
 --     partitionBy = QueryM . lift . partitionBy
 
-type M a = StateT QueryState (QueryT SQL.Flat) (a)
+type M a = StateT QueryState (QueryT) (a)
 runQueryM :: Int -> QueryM SQL.Flat (x, Result a) -> (QueryState, SQL.SubQuery, (x, RowParser a))
 runQueryM id0 (QueryM q) = undoShift $ SQL.configureQuery (toSubQuery (selects . snd) $ fmap (\((v,a),b) -> ((v,b),a)) $ runStateT q (QS id0 mempty mempty)) SQL.defaultConfig 
    where
@@ -225,15 +253,6 @@ singular [a] = a
 singular _ = error "Invalid query"
 
 -- testQ :: HasCallStack => QueryM SQL.Flat (RowParser (), Result (Account, ()))
-testQ = asRoot $ do
-    acc <- SQL.query account
-    custs <- mkJoin acc.customer $ \customer ->
-       pure (sel customer)
-    SQL.wheres $ acc.availBalance SQL..>. SQL.value (Just (25000::Double))
-    pure $ do
-        ac <- sel acc
-        cust <- custs
-        pure (ac, cust)
        -- ac <- sel acc
 
       -- aid <- sel acc.accountId
@@ -258,7 +277,7 @@ class Monad m => GetRows m where
     getRows :: m QMap
 
 class RestrictQuery r where
-    restrictToParent :: r -> V.Vector Row -> QueryT SQL.Flat ()
+    restrictToParent :: r -> V.Vector Row -> QueryT ()
 type Id = Int
 class (Typeable k, Ord k) => RelationAnchor r k | r -> k where
     parseParentKey :: r -> Result k
