@@ -1,48 +1,41 @@
 # [ORM][]
 
-Thanks for starting a project with Haskeleton! If you haven't heard of it
-before, I suggest reading the introductory blog post. You can find it here:
-<http://taylor.fausak.me/2014/03/04/haskeleton-a-haskell-project-skeleton/>.
+Experiment with proper object relational mappings in Haskell. Three points
 
-Before you get started, there are a few things that this template couldn't
-provide for you. You should:
+- Easy joins through foreign keys
+- Automatically parse into nested results
+- Allow easy updates of nested types by diffing
 
--   Add a synopsis to `package.yaml`. It should be a short (one sentence)
-    explanation of your project.
+Example query:
 
--   Add a description to `package.yaml`. This can be whatever you want it to
-    be.
+```Haskell
+testQ :: QueryM (Result (Customer, [Account]))
+testQ = queryRoot $ do
+    cust <- SQL.query customer
+    vaccs <- nested cust.accounts $ \acc -> do
+       SQL.wheres (acc.availBalance .>. value (Just (25000::Double))) 
+       pure (sel acc)
+    pure $ do
+        c <- sel cust
+        accs <- vaccs
+        pure (c, accs)
+```
+This builds on relational-query for the query building monad. We add nested queries.
+Each `nested` adds an extra query, so we run roughly the following queries:
 
--   Add a category to `package.yaml`. A list of categories is available on
-    Hackage at <http://hackage.haskell.org/packages>.
-
--   Rename `library/Example.hs` to whatever you want your top-level module to
-    be called. Typically this is the same as your package name but in
-    `CamelCase` instead of `kebab-case`.
-
-    -   Don't forget to rename the reference to it in
-        `executable/Main.hs`!
-
--   If you are on an older version of Stack (<1.0.4), delete `package.yaml` and
-    remove `/*.cabal` from your `.gitignore`.
-
-Once you've done that, start working on your project with the Stack commands
-you know and love.
-
-``` sh
-# Build the project.
-stack build
-
-# Run the test suite.
-stack test
-
-# Run the benchmarks.
-stack bench
-
-# Generate documentation.
-stack haddock
+```SQL
+SELECT C.* FROM Customers C
+SELECT A.customer_id, A.* FROM Account A WHERE A.availBalance > 25000 AND A.customer_id IN (?,?,?,...) 
 ```
 
-Thanks again, and happy hacking!
+The `cust.accounts` uses -XRecordDotSyntax to resolve the join metadata, but there is no real field.
 
-[ORM]: https://github.com/githubuser/ORM
+The process goes:
+
+- Run the query builder monad. Each `nested` receives an identifier and is stashed into a Typeable map.
+- After the root query is run and executed, we can run the delayed children. The children receive a vector of rows.
+- The results are grouped by some key so we can retreive them given a parent row
+- Each query returns a Result which both generates the select statement and parses the result. They have access to all results, keyed by nested identifiers. `nested` generates a `Result` which retrieves the relevant child rows and parses them using these keys
+
+
+We can extend this to monadic profunctors. Each QueryM also is a serializer to turn values into rows,  we diff rows to generate patches, and we apply patches to the database as insert/update/delete statements.
