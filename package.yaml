@@ -43,6 +43,7 @@ library:
   - relational-query-HDBC
   - relational-schemas
   - template-haskell
+  - free
   source-dirs: library
 
 executables:
