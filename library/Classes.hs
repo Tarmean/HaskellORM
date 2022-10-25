@@ -17,7 +17,6 @@
 {-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE DerivingStrategies #-}
 module Classes where
-import Types (QueryBuilder)
 import GHC.Stack (HasCallStack)
 import Database.HDBC.Sqlite3 (connectSqlite3)
 import qualified Data.Vector as V
@@ -54,9 +53,88 @@ import qualified Database.Relational.OverloadedProjection as SQLOP
 
 import GHC.Types (Symbol, Type)
 import Data.Dynamic
-import Data.Coerce (coerce)
-import Data.Void (Void, absurd)
 import qualified Database.Record.ToSql as Record
+
+-- TODO: implement PostQuery updates
+-- it's another tree traversal
+--
+-- requires a merging operator
+-- requires access to the old data
+-- requires some grouping, but on the raw rows or on the parsed data?
+data Query = forall k a. (Ord k, Typeable k, Typeable a) => Query {
+    queryId :: !QId,
+    sqlQuery :: [k] -> QueryM SQL.Flat (RowParser k, Result a),
+    parentKey :: RowParser k
+}
+data QueryKind = KeyInParent | KeyInChild
+kpInsert :: Row -> () -> IO Row
+kpInsert = undefined
+kpUpdate :: Row -> Row -> IO Row
+kpUpdate = undefined
+kpDelete :: Row -> Row -> IO Row
+kpDelete = undefined
+
+kcInsert :: Row -> () -> IO ()
+kcInsert = undefined
+kcUpdate :: Row -> Row -> IO ()
+kcUpdate = undefined
+kcDelete :: Row -> Row -> IO ()
+kcDelete = undefined
+
+-- kp:
+--   onInsert:
+--     - insert: pre
+--     - update: _
+--     - delete: n/a
+--   onUpdate:
+--     - insert: pre
+--     - update: _
+--     - delete: pre
+--   onDelete:
+--     - insert: n/a
+--     - update: n/a
+--     - delete: post
+--
+-- kc:
+--   onInsert:
+--     - insert: post
+--     - update: post
+--     - delete: n/a
+--   onUpdate:
+--    - insert: _
+--    - update: _
+--    - delete: _
+--   onDelete:
+--    - insert: n/a
+--    - update: n/a
+--    - delete: pre
+
+type UpdateIP = Row -> (Maybe Row) -> (Maybe Row) -> IO Row
+type UpdateIC = Row -> (Maybe Row) -> (Maybe Row) -> IO ()
+
+
+-- runDelete :: Typeable a => PostQuery -> a -> IO ()
+-- runDelete pq a = do
+--    traverse_ (uncurry (runDeletePre rs)) (M.intersectWith (,) childrenQueries vm)
+--    execDelete rs
+--    traverse_ (uncurry (runDeletePost rs)) (M.intersectWith (,) childrenQueries vm)
+--   where
+--     (rs, VMap vm) = unparseQuery pq a
+-- runUpsert :: Typeable a => PostQuery -> a -> IO [(SQL.Column, SQLV.SqlValue)]
+-- runUpsert pq a =  do
+--    os <- traverse (uncurry (runInnerPost rs)) (M.intersectWith (,) childrenQueries vm)
+--    let rs' = rs <> os
+--    o <- execUpsert (rs <> os)
+--    let rs'' = rs' <> o
+--    traverse_ (uncurry (runInnerPost rs'')) (M.intersectWith (,) childrenQueries vm)
+--   where
+--     (rs, VMap vm) = unparseQuery pq a
+
+data PostQuery = forall k a. (Ord k, Typeable k, Typeable a) => PostQuery {
+    pqueryId :: !QId,
+    unparseQuery :: a -> ([(SQL.Column, SQLV.SqlValue)], VMap),
+    childrenQueries :: M.Map QId Query
+}
 
 
 testQ :: QueryM
@@ -64,13 +142,13 @@ testQ :: QueryM
   (RowParser (),
    Ap ResultF (Account, [Customer]) (Account, [Customer]))
 testQ = asRoot $ do
-    acc <- SQL.query account
-    custs <- mkJoin acc.customer $ \cust ->
+    accQ <- SQL.query account
+    custQ <- mkJoin accQ.customer $ \cust ->
        pure (sel cust)
-    SQL.wheres $ acc.availBalance SQL..>. SQL.value (Just (25000::Double))
+    SQL.wheres $ accQ.availBalance SQL..>. SQL.value (Just (25000::Double))
     pure $ do
-        ac <- fst =. sel acc
-        cust <- snd =. custs
+        ac <- fst =. sel accQ
+        cust <- (\(acc, cust) -> (acc.custId, cust)) =. custQ
         pure (ac, cust)
 
 class FundepHack a b c | a b -> c
@@ -93,10 +171,6 @@ type family AccountField (l :: Symbol) b where
    AccountField "customer"  b = IsRel b
    AccountField l b = IsProj b
 
--- instance (x ~ (JoinConfig Int Singular)) => ORMField "customer" Account x where
---     ormField r = JoinConfig {joinKeyR = #custId, joinTarget = customer, joinFinalizer = singular, joinOrigin = r.custId  }
-    
-    
 
 
 type QueryT = SQL.Orderings SQL.Flat SQL.QueryCore
@@ -110,7 +184,6 @@ toSubQuery toTups q = do
    let (pj, parser) = (interpTuple res, interpParser res)
        tups = toTups x
        fullTups = (tups <> pj)
-       -- mapping = M.fromList (zip fullTups [1..])
    pure $ (x, SQL.flatSubQuery c fullTups da pd (map Record.untype rs) ot, (skipParser (length tups) *> parser))
   where
     extract =  SQL.extractCore . SQL.extractOrderingTerms
@@ -119,7 +192,7 @@ data QueryState = QS { qidGen :: Int, subQueries :: M.Map QId Query, selects :: 
 instance Show QueryState where
    show QS{..} = "QS { qidGen = " <> show qidGen <> ", subQueries = ..., selects = " <> show selects <> " }"
 
-    
+
 type family TEval f a :: Type
 data Singular
 type instance TEval Singular a = a
@@ -131,8 +204,6 @@ data JoinConfig k b f
        joinOrigin :: Record.Record SQL.Flat k
    }
 
-joinConfig :: (forall x. [x] -> TEval f x) -> Record.Record SQL.Flat k -> JoinConfig k b f
-joinConfig = JoinConfig undefined undefined
 mkJoin :: (
     SQLV.FromSql HDBC.SqlValue k,
     SQLP.PersistableWidth k,
@@ -140,28 +211,25 @@ mkJoin :: (
     SQL.LiteralSQL k,
     Typeable k,
     Typeable r,
-    Ord k
-  ) => JoinConfig k b f -> (Record.Record SQL.Flat b -> QueryM SQL.Flat (Result r)) ->  QueryM SQL.Flat (Result [r])
+    Ord k, Record.ToSql HDBC.SqlValue k
+  ) => JoinConfig k b f -> (Record.Record SQL.Flat b -> QueryM SQL.Flat (Result r)) ->  QueryM SQL.Flat (Result' (k, [r]) [r])
 mkJoin cfg parse = do
-     
-      nested (sel' (joinOrigin cfg)) $ \row -> do
+      nested (sel (joinOrigin cfg)) $ \row -> do
         child <- SQL.query (joinTarget cfg)
         let key = child SQL.!  joinKeyR cfg
         SQL.wheres $ SQL.in' key (SQL.values  row)
         childKey <- resultToRowParser (sel' key)
         fmap (childKey,) (parse child)
 
-type UnParse r = ReaderT r (Const ([(SQL.Column, SQLV.SqlValue)], VMap))
+type UnParse r = r -> [(SQL.Column, SQLV.SqlValue)]
 
 
-class ExecInsert r where
-    execInsert :: r -> [(SQL.Column, SQLV.SqlValue)] -> IO Int
-nested :: (Typeable a, Typeable k, Ord k) => (Result' x k) -> ([k] -> QueryM SQL.Flat (RowParser k, Result a)) -> QueryM m (Result [a])
+nested :: (Typeable a, Typeable k, Ord k) => (Result k) -> ([k] -> QueryM SQL.Flat (RowParser k, Result a)) -> QueryM m (Result' (k, [a]) [a])
 nested parentKey cb = do
    qid <- genQId
    rp <- resultToRowParser parentKey
    tellQuery (Query qid cb rp)
-   pure $ getFetched (QKey qid) rp
+   pure $ getFetched (QKey qid) (interpPrinter parentKey) rp
 genQId :: QueryM m QId
 genQId = do
    qs <- get
@@ -206,8 +274,6 @@ sel' rec
       | start < 0 || V.length v < start + len = error $ " Invalid slice " <> show (start,len,V.length v, show v, show (Record.untype rec))
       | otherwise = V.slice start len v
     r off v = SQLV.toRecord $ V.toList (sliceVector off wid v)
--- nested :: (V.Vector Row  -> QueryM (Result b)) -> QKey [b]
--- localResult :: Result a -> QueryM f (RowParser a)
 newtype QueryM f a = QueryM { unQueryM :: StateT QueryState (QueryT) a }
   deriving (Functor, Applicative, Monad, MonadState QueryState)
 instance MonadRestrict SQL.Flat (QueryM SQL.Flat) where
@@ -219,8 +285,6 @@ instance  MonadQuery (QueryM f) where
    restrictJoin = QueryM . lift . restrictJoin
    query' = QueryM . lift . query'
    queryMaybe' = QueryM . lift . queryMaybe'
--- instance  MonadPartition f (QueryM f) where
---     partitionBy = QueryM . lift . partitionBy
 
 type M a = StateT QueryState (QueryT) (a)
 runQueryM :: Int -> QueryM SQL.Flat (x, Result a) -> (QueryState, SQL.SubQuery, (x, RowParser a))
@@ -228,7 +292,6 @@ runQueryM id0 (QueryM q) = undoShift $ SQL.configureQuery (toSubQuery (selects .
    where
      undoShift ((v,qs),sq,o) = (qs,sq,(v,o))
 
--- runTestQ :: IO ([Int])
 runTestQ :: IO [(Account, [Customer])]
 runTestQ = do
     conn <- connectSqlite3 "examples.db"
@@ -250,41 +313,19 @@ runAQuery rp q = do
 
 liftConfig :: SQL.ConfigureQuery a -> M a
 liftConfig = lift . lift . lift . lift
-  -- pure $ \r -> parser <$> SQL.nested r sub
 
 
 type Row = V.Vector SQLV.SqlValue
 
-class Monad m => GetRows m where
-    getRows :: m QMap
 
 class RestrictQuery r where
     restrictToParent :: r -> V.Vector Row -> QueryT ()
 type Id = Int
-class (Typeable k, Ord k) => RelationAnchor r k | r -> k where
-    parseParentKey :: r -> Result k
-    parseSelfKey :: r -> Result k
-data QueryRoot = QueryRoot
-  deriving (Eq, Ord, Show)
-instance RelationAnchor QueryRoot () where
-    parseParentKey _ = pure ()
-    parseSelfKey _ = pure ()
--- class LoadRelation r k a | r -> k a where
---     parseResult :: r -> k -> m a
-
--- data ChildRef a = ChildRef { childRef :: a, childKey :: Key a }
 
 newtype QId = QId Int deriving (Eq, Ord, Show)
-class MakeQuery a where
-
-data NJoin a b = With a b
 
 
-data Query = forall k a. (Ord k, Typeable k, Typeable a) => Query {
-    queryId :: !QId,
-    sqlQuery :: [k] -> QueryM SQL.Flat (RowParser k, Result a),
-    parentKey :: RowParser k
-}
+
 
 skipParser :: Int -> RowParser ()
 skipParser i = modify (+i)
@@ -301,29 +342,32 @@ runKeyParser rp v  = runRowParser rp undefined v
 type Result' = Ap ResultF
 type Result a = Result' a a
 data ResultF r a where
-    NestedQ :: QKey a -> RowParser [a] -> ResultF [a] [a]
+    NestedQ :: Typeable a => QKey a -> UnParse r -> RowParser [a] -> ResultF (r, [a]) [a]
     ParseQ :: { cols :: SQL.Tuple, colPrinter ::  (r -> [SQLV.SqlValue]) , colParser :: RowParser a } -> ResultF r a
 interpParser :: Result' x a -> RowParser a
 interpParser =  runAp \case
-    NestedQ _ q -> q
+    NestedQ _ _ q -> q
     ParseQ _ _ q -> q
 interpTuple :: Result' x a -> SQL.Tuple
 interpTuple = runAp_ \case
-    NestedQ _ _ -> []
+    NestedQ _ _ _ -> []
     ParseQ t _ _  -> t
-interpPrinter :: Result' a a -> a -> [(SQL.Column, SQLV.SqlValue)]
+interpPrinter :: Result' r a -> r -> [(SQL.Column, SQLV.SqlValue)]
 interpPrinter = runBAp_ $ \x -> \case
-    NestedQ _ _ -> []
+    NestedQ _ r _ -> r (fst x)
     ParseQ t prnt _ -> (zip t (prnt x))
--- runResult :: Result a -> (SQL.Tuple, RowParser a)
--- runResult (Result (Const e :*: p)) = (appEndo e mempty, p)
+interpChildren :: Result' a a -> a -> VMap
+interpChildren = runBAp_ $ \x -> \case
+    NestedQ v _ _ -> VMap (M.singleton (theId v) (toDyn $ snd x))
+    ParseQ _ _ _ -> mempty
+
 type Parser a = Reader ParserState a
 
 
 
 instance SQLV.FromSql SQLV.SqlValue Row where
     recordFromSql = SQLV.createRecordFromSql $ \v -> (V.fromList v, [])
-    
+
 class Monad m => ExecQuery m where
     execQuery :: SQL.SubQuery -> m [Row]
 instance (HDBC.IConnection conn) => ExecQuery (ReaderT conn IO) where
@@ -343,10 +387,8 @@ mkGrouping kp rows = M.map (V.fromList . flip appEndo []) $ M.fromListWith (<>) 
 
 
 data ResultMap = forall k a. (Typeable k, Ord k, Typeable a) => ResultMap (M.Map k (V.Vector Row)) (RowParser a)
-unResultMap :: (Typeable k, Typeable a) => ResultMap -> Maybe (M.Map k (V.Vector Row), RowParser a)
-unResultMap (ResultMap m b) = cast (m, b)
 unResultMap1 :: (Typeable k) => ResultMap -> Maybe (M.Map k (V.Vector Row))
-unResultMap1 (ResultMap m _) = cast (m)
+unResultMap1 (ResultMap m _) = cast m
 
 newtype QMap = QMap { unQMap :: M.Map QId ResultMap}
 newtype VMap = VMap { unVMap :: M.Map QId Dynamic }
@@ -358,13 +400,6 @@ instance Monoid VMap where
 
 data HasMany = HasMany { parentId :: QId, selfId :: QId, parentCol :: String, childCol :: String, table :: String }
   deriving (Eq, Ord, Show, Typeable)
-data Selector = QId :. String
-selectField :: Selector -> QueryBuilder -> QueryBuilder
-selectField = undefined
-instance RelationAnchor HasMany String where
-    -- parseParentKey r row = row M.! parentCol r
-    -- parseSelfKey r row = row M.! childCol r
-instance RestrictQuery HasMany where
 
 lookupQMapRoot :: QMap -> V.Vector Row
 lookupQMapRoot qmap = do
@@ -390,15 +425,6 @@ data ParserState = ParserState {
     curRow :: Row
 }
 
-getCurRow :: (MonadReader ParserState m) => m Row
-getCurRow = do
-    ParserState {curRow} <- ask
-    pure curRow
-
-castParser :: forall a b. (Typeable a, Typeable b) => Reader ParserState a -> Maybe (Reader ParserState b)
-castParser r
-  | Just Refl <- eqT @a @b = Just r
-  | otherwise = Nothing
 
 loadNested :: (Monad m, ExecQuery m) => Query -> m QMap
 loadNested  q0 = QMap <$> evalStateT (go (V.fromList []) q0) 1
@@ -406,7 +432,7 @@ loadNested  q0 = QMap <$> evalStateT (go (V.fromList []) q0) 1
     go v (Query qId q' kp) = do
       idx <- get
       let parsedKeys = map (runKeyParser kp) (V.toList v)
-      (QS {qidGen = idx', subQueries=m', selects=cols},sql,(keyParser, parser)) <- pure (runQueryM idx (q' parsedKeys))
+      (QS {qidGen = idx', subQueries=m'},sql,(keyParser, parser)) <- pure (runQueryM idx (q' parsedKeys))
       put idx'
       out <- execQuery sql
       let v' = V.fromList out
@@ -414,12 +440,12 @@ loadNested  q0 = QMap <$> evalStateT (go (V.fromList []) q0) 1
       return $ M.insert qId (ResultMap (mkGrouping keyParser (V.toList v')) parser) (mconcat children)
 
 
-getFetched :: (Typeable a, Typeable k, Ord k) => QKey a -> KeyParser k -> Result [a]
-getFetched qk kp = liftAp $ NestedQ qk $ do
+getFetched :: (Typeable a, Typeable k, Ord k) => QKey a -> UnParse k -> KeyParser k -> Result' (k, [a]) [a]
+getFetched qk up kp = liftAp $ NestedQ qk up $ do
     k <- kp
     (qm, _) <- ask
     pure $ runParserFor qk k qm
-   
+
 runParserRoot :: Typeable a => QMap -> [a]
 runParserRoot qmap = runParserFor (QKey (QId 0)) () qmap
 
@@ -428,10 +454,4 @@ runParserFor qkey k qmap = map (runRowParser pars qmap) (V.toList root)
   where
     pars = lookupQMapParser qkey qmap
     root = fromJust (lookupQMap (theId qkey) k qmap)
-
-
-pList :: Reader ParserState a -> [Row] -> [a]
-pList = undefined
-getField :: String -> Row -> a
-getField = undefined
 

@@ -38,10 +38,10 @@ runBAp alg a0 = go a0
     go (Ap f g) x = go f x <*> go g x
     go (LMap f a) x = go a (f x)
 
-runBAp_ :: forall f g a. Monoid g => (forall r' x. r' -> f r' x -> g) -> Ap f a a -> a -> g
+runBAp_ :: forall f r g a. Monoid g => (forall r' x. r' -> f r' x -> g) -> Ap f r a -> r -> g
 runBAp_ alg a0 = go a0
   where
-    go :: Ap f r b -> r -> g
+    go :: Ap f r' b -> r' -> g
     go (Pure _) _x = mempty
     go (LiftF f) x = alg x f
     go (Ap f g) x = go f x <> go g x
