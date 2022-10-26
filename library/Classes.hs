@@ -30,7 +30,6 @@ import Data.Maybe (fromJust)
 import Database.Relational.OverloadedInstances ()
 import Entity.Customer
 import Entity.Account
-import Data.Functor.Const
 import qualified Database.Relational.SqlSyntax as SQL
 import qualified Database.Relational.Monad.Trans.Ordering as SQL
 import qualified Database.Relational.Monad.Trans.Restricting as SQL
@@ -54,6 +53,13 @@ import qualified Database.Relational.OverloadedProjection as SQLOP
 import GHC.Types (Symbol, Type)
 import Data.Dynamic
 import qualified Database.Record.ToSql as Record
+
+data UpdateStep = UpsertNow (IO [(SQL.Column, SQLV.SqlValue)]) | DeleteLater (IO ())
+
+data Updater = Updater {
+    runUpdate :: [(SQL.Column, SQLV.SqlValue)] -> [(SQL.Column, SQLV.SqlValue)] -> UpdateStep
+    propagation :: [(SQL.Column, SQL.Column)]
+}
 
 -- TODO: implement PostQuery updates
 -- it's another tree traversal
@@ -108,9 +114,6 @@ kcDelete = undefined
 --    - insert: n/a
 --    - update: n/a
 --    - delete: pre
-
-type UpdateIP = Row -> (Maybe Row) -> (Maybe Row) -> IO Row
-type UpdateIC = Row -> (Maybe Row) -> (Maybe Row) -> IO ()
 
 
 -- runDelete :: Typeable a => PostQuery -> a -> IO ()
