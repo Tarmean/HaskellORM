@@ -29,7 +29,7 @@ runAp_ _alg (Pure _) = mempty
 runAp_ alg (LMap _ a) = runAp_ alg a
 runAp_ alg (Ap f g) = runAp_ alg f <> runAp_ alg g
 
-runBAp :: forall f g a. Applicative g => (forall r' x. r' -> f r' x -> g x) -> Ap f a a -> a -> g a
+runBAp :: forall f g a n. Applicative g => (forall r' x. r' -> f r' x -> g x) -> Ap f n a -> n -> g a
 runBAp alg a0 = go a0
   where
     go :: Ap f r b -> r -> g b
