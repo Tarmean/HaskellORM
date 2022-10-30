@@ -59,15 +59,27 @@ import Control.Applicative (Applicative(liftA2))
 
 data UpdateStep = UpsertNow (IO [(SQL.Column, SQLV.SqlValue)]) | DeleteLater (IO ())
 
+data UpdatedRow = DeleteRow | Noop | SetRow [(QueryRef, SQLV.SqlValue)]
+    deriving (Show)
+instance Semigroup UpdatedRow where
+    (<>) Noop x = x
+    (<>) x Noop = x
+    (<>) DeleteRow DeleteRow = DeleteRow
+    (<>) (SetRow a) (SetRow b) = SetRow (a <> b)
+    (<>) a b = error $ "UpdatedRow: " <> show a <> " <> " <> show b
+instance Monoid UpdatedRow where
+    mempty = Noop
+type QueryRef = SQL.Qualified Int
 data Updater = Updater {
-    runUpdate :: [(SQL.Column, SQLV.SqlValue)] -> [(SQL.Column, SQLV.SqlValue)] -> UpdateStep,
+    runUpdate :: Maybe [(QueryRef, SQLV.SqlValue)] -> UpdatedRow -> UpdateStep,
     propagation :: [(SQL.Column, SQL.Column)]
 }
 
 execUpdate :: forall a k. (Typeable a, Typeable k) => k -> [a] -> QKey k a -> QMap -> IO ()
 execUpdate g a k qmap =  undefined
   where
-       changes = deltaRows g k qmap a
+    changes = deltaRows g k qmap a
+    applyOne up (Just i, Nothing) = runUpdate up (Just i) DeleteRow
    -- ResultEntry @_ @k' @a' dat parse write
    --   | (Just Refl,Just Refl) <- (eqT @a @a', eqT @k @k') -> do
    --     let old = dat M.! g
@@ -145,11 +157,6 @@ kcDelete = undefined
 --   where
 --     (rs, VMap vm) = unparseQuery pq a
 
-data PostQuery = forall k a. (Ord k, Typeable k, Typeable a) => PostQuery {
-    pqueryId :: !QId,
-    unparseQuery :: a -> ([(SQL.Column, SQLV.SqlValue)], VMap)
-    -- childrenQueries :: M.Map QId Query
-}
 
 testQ :: QueryM SQL.Flat (AResult Int (Account, [Customer]))
 testQ = do
