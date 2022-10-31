@@ -41,7 +41,7 @@ extra-deps:
 - HDBC-sqlite3-2.3.3.1@sha256:5025fd94d02b9b3f0b8b8233796dd9a85a0b3dda6503c6e671e3eddbc51cb4d4,2424
 - persistable-record-0.6.0.5@sha256:0ba4ceca681b5eb7ec9e57adea54c781cbe0cb8014d037b5fa024e8738cf644f,3180
 - git: https://github.com/Tarmean/haskell-relational-record/
-  commit: 894ddd3ff4d76b9e679e2f6f690394bc2ab9871c
+  commit: 3c0ef6b8a906f3dfaf0bdbe3d80699d777136957
   subdir: relational-query
 # - relational-query-0.12.3.0@sha256:0e816841a1d6c47924fc6f0216eee87989bc74a6c9fa3f0d10413151475b7938,8516
 - relational-query-HDBC-0.7.2.0@sha256:e68a11962963628a1489b0dc6a9abae4e53c667e35d3c6eadcbb561b70d76c74,4280

@@ -39,12 +39,12 @@ packages:
     git: https://github.com/Tarmean/haskell-relational-record/
     pantry-tree:
       size: 5595
-      sha256: 194e3e4ac602965b7450ebcdcd3971705d52440908fcc57066693af7ed9425c1
-    commit: 894ddd3ff4d76b9e679e2f6f690394bc2ab9871c
+      sha256: c50fcf90122a09296daca7a83cc9e1ec05484672d5394000cd9fa0dac5831d50
+    commit: 3c0ef6b8a906f3dfaf0bdbe3d80699d777136957
   original:
     subdir: relational-query
     git: https://github.com/Tarmean/haskell-relational-record/
-    commit: 894ddd3ff4d76b9e679e2f6f690394bc2ab9871c
+    commit: 3c0ef6b8a906f3dfaf0bdbe3d80699d777136957
 - completed:
     hackage: relational-query-HDBC-0.7.2.0@sha256:e68a11962963628a1489b0dc6a9abae4e53c667e35d3c6eadcbb561b70d76c74,4280
     pantry-tree:

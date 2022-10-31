@@ -45,6 +45,7 @@ library:
   - template-haskell
   - free
   - appendmap
+  - sql-words
   source-dirs: library
 
 executables:
