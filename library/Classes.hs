@@ -61,7 +61,7 @@ import Database.Relational.Internal.UntypedTable as UT
 import qualified Data.Map.Merge.Strict as M
 data UpdateStep = UpsertNow (IO [(SQL.StringSQL, SQLV.SqlValue)]) | DeleteLater (IO ())
 
-data UpdatedRows = UR (M.Map Int UpdatedRow)
+data UpdatedRows = UR (M.Map QId UpdatedRow)
   deriving Show
 instance Semigroup UpdatedRows where
   UR a <> UR b = UR (M.unionWith (<>) a b)
@@ -105,8 +105,11 @@ splitString seque =
 execUpdate :: forall a k. (Typeable a, Typeable k) => k -> [a] -> QKey k a -> QMap -> IO ()
 execUpdate g a k qmap = undefined
   where
-    changes = deltaRows g k qmap a
+    changes :: [M.Map Int Step]
+    changes = fmap (uncurry diffRow) (deltaRows g k qmap a)
+    -- updaters = lookupQMapUpdater k qmap
     applyOne up (Just i, Nothing) = runUpdate up (Just i) DeleteRow
+
 
 
 
@@ -294,12 +297,12 @@ sel rec
 -- instance Monad m => MonadPartition c (PartitioningSetT c m)
 --   -- Defined in ‘Database.Relational.Monad.Trans.Aggregating’
 
-resolveColumn :: M.Map Int UTable -> SQL.Column -> Maybe (Int, Col)
-resolveColumn utab (SQL.RawColumn s) = Just $ (a, Col (UT.name' (utab M.! a)) b)
+resolveColumn ::QId -> M.Map Int UTable -> SQL.Column -> Maybe (QId, Col)
+resolveColumn qid utab (SQL.RawColumn s) = Just $ (qid, Col (UT.name' (utab M.! a)) b)
   where (a,b) = splitString s
-resolveColumn _ _ = Nothing
-decideUpdatesDefault :: SQL.Tuple -> M.Map Int UTable -> [HDBC.SqlValue] -> UpdatedRows
-decideUpdatesDefault tups m vals = UR $ M.fromListWith (<>) [(i , SetRow (M.singleton (Col (UT.name' (m M.! i)) c) val))  | (SQL.RawColumn str, val) <- zip tups vals, let (i,c) = splitString str  ]
+resolveColumn _ _ _ = Nothing
+decideUpdatesDefault :: QId -> SQL.Tuple -> M.Map Int UTable -> [HDBC.SqlValue] -> UpdatedRows
+decideUpdatesDefault qid tups m vals = UR $ M.fromListWith (<>) [(qid , SetRow (M.singleton (Col (UT.name' (m M.! i)) c) val))  | (SQL.RawColumn str, val) <- zip tups vals, let (i,c) = splitString str  ]
   -- [] -> mempty
   -- xs -> SetRow xs
 newtype QueryM f a = QueryM { unQueryM :: StateT QueryState (QueryT) a }
@@ -554,7 +557,7 @@ deltaRows k (QKey qid) qmap as =
 type VRow = M.Map Col SQLV.SqlValue
 data Step = Delete  VRow | Insert VRow | Update VRow
   deriving (Eq, Show)
-diffRow :: Maybe RawRow -> Maybe UpdatedRows -> M.Map Int Step
+diffRow :: Maybe RawRow -> Maybe UpdatedRows -> M.Map QId Step
 diffRow (Just r) Nothing = M.map Delete r
 diffRow Nothing Nothing = error "foo"
 diffRow Nothing (Just (UR a)) = M.mapMaybe (\case
@@ -563,7 +566,7 @@ diffRow Nothing (Just (UR a)) = M.mapMaybe (\case
 diffRow (Just a) (Just (UR ms)) = out
   where
     -- keep only rhs
-    out :: M.Map Int Step
+    out :: M.Map QId Step
     out = M.merge M.dropMissing (M.mapMaybeMissing (\_ -> \case
       (SetRow x) -> Just (Insert x)
       _ -> Nothing)) (M.zipWithMaybeMatched inner) a ms
@@ -577,7 +580,7 @@ diffRow (Just a) (Just (UR ms)) = out
       | otherwise = Just b
 
 
-type RawRow = M.Map Int (M.Map Col SQLV.SqlValue)
+type RawRow = M.Map QId (M.Map Col SQLV.SqlValue)
 labelRow :: SQL.Tuple -> M.Map Int UTable -> Row -> RawRow
 labelRow tuple umap row = M.fromListWith (<>) [ (idx, M.singleton col r) | (t,r) <- zip tuple (V.toList row), Just (idx, col) <- [resolveColumn umap t] ]
 
