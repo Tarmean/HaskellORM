@@ -28,7 +28,7 @@ import Control.Monad.Reader
 
 import Database.Relational.OverloadedInstances ()
 import Entity.Customer ( Customer(custId), customer )
-import Entity.Account ( Account(accountId), account )
+import Entity.Account ( Account(accountId), account, availBalance )
 import qualified Database.Relational.SqlSyntax as SQL
 import qualified Database.Relational.Monad.Trans.Ordering as SQL
 import qualified Database.Relational.Monad.Trans.Restricting as SQL
@@ -58,36 +58,33 @@ import qualified Data.Set as S
 import Control.Applicative (Applicative(liftA2))
 import qualified Language.SQL.Keyword.Type as Words
 import Database.Relational.Internal.UntypedTable as UT
+import qualified Data.Map.Merge.Strict as M
 data UpdateStep = UpsertNow (IO [(SQL.StringSQL, SQLV.SqlValue)]) | DeleteLater (IO ())
 
-data UpdatedRows = UR (M.Map String UpdatedRow)
+data UpdatedRows = UR (M.Map Int UpdatedRow)
   deriving Show
 instance Semigroup UpdatedRows where
   UR a <> UR b = UR (M.unionWith (<>) a b)
 instance Monoid UpdatedRows where
     mempty = UR M.empty
-data UpdatedRow = DeleteRow | Noop | SetRow [(String, SQLV.SqlValue)]
+data UpdatedRow = DeleteRow | SetRow (M.Map Col SQLV.SqlValue)
     deriving (Show)
 instance Semigroup UpdatedRow where
-    (<>) Noop x = x
-    (<>) x Noop = x
     (<>) DeleteRow DeleteRow = DeleteRow
     (<>) (SetRow a) (SetRow b) = SetRow (a <> b)
     (<>) a b = error $ "UpdatedRow: " <> show a <> " <> " <> show b
-instance Monoid UpdatedRow where
-    mempty = Noop
 type QueryRef = SQL.Qualified Int
 data Updater = Updater {
     runUpdate :: Maybe [(QueryRef, SQLV.SqlValue)] -> UpdatedRow -> UpdateStep,
     propagation :: [(SQL.StringSQL, SQL.StringSQL)]
 }
 
-data Col = Col { colTable :: UTable, colName :: String }
-    deriving (Show)
+data Col = Col { colTable :: String, colName :: String }
+    deriving (Show, Eq, Ord)
 stringSQLToRow :: SQL.SubQuery -> SQL.StringSQL -> Col
 stringSQLToRow sq = \x -> 
   let (a,b) = splitString x
-  in Col (maps M.! a) b
+  in Col (UT.name' (maps M.! a)) b
   where maps = tableMappings sq
 tableMappings :: SQL.SubQuery -> M.Map Int UT.UTable
 tableMappings sq0= case sq0 of
@@ -297,12 +294,12 @@ sel rec
 -- instance Monad m => MonadPartition c (PartitioningSetT c m)
 --   -- Defined in ‘Database.Relational.Monad.Trans.Aggregating’
 
-resolveColumn :: M.Map Int UTable -> SQL.Column -> Maybe Col
-resolveColumn utab (SQL.RawColumn s) = Just $ Col (utab M.! a) b
+resolveColumn :: M.Map Int UTable -> SQL.Column -> Maybe (Int, Col)
+resolveColumn utab (SQL.RawColumn s) = Just $ (a, Col (UT.name' (utab M.! a)) b)
   where (a,b) = splitString s
 resolveColumn _ _ = Nothing
 decideUpdatesDefault :: SQL.Tuple -> M.Map Int UTable -> [HDBC.SqlValue] -> UpdatedRows
-decideUpdatesDefault tups m vals = UR $ M.fromListWith (<>) [(UT.name' (m M.! i) , SetRow [(c, val)])  | (SQL.RawColumn str, val) <- zip tups vals, let (i,c) = splitString str  ]
+decideUpdatesDefault tups m vals = UR $ M.fromListWith (<>) [(i , SetRow (M.singleton (Col (UT.name' (m M.! i)) c) val))  | (SQL.RawColumn str, val) <- zip tups vals, let (i,c) = splitString str  ]
   -- [] -> mempty
   -- xs -> SetRow xs
 newtype QueryM f a = QueryM { unQueryM :: StateT QueryState (QueryT) a }
@@ -331,7 +328,7 @@ runTestQ :: IO [(Account, [Customer])]
 runTestQ = do
     conn <- connectSqlite3 "examples.db"
     (qmap,a) <- runReaderT (runAQuery testQ) conn
-    print (toDeltaRoot a qmap)
+    print (toDeltaRoot (fmap (\(x,y) -> (x{availBalance=fmap(+1) x.availBalance},y)) a) qmap)
     pure a
 
 singular :: [a] -> a
@@ -539,8 +536,8 @@ lookupQMapUnparse (QKey qid) qmap = do
        | Just o <- cast (interpReparse p) -> o
        | otherwise -> error ("Illegal parer" <> show qid <> ", expected type " <> show (typeOf (undefined :: a)) <> ", got type ")
 
-toDeltaRoot :: Typeable a => [a] -> QMap -> [(Maybe RawRow, Maybe UpdatedRows)]
-toDeltaRoot ls q = deltaRows () (QKey (QId 0)) q ls
+toDeltaRoot :: Typeable a => [a] -> QMap -> [M.Map Int Step]
+toDeltaRoot ls q = fmap (uncurry diffRow) $ deltaRows () (QKey (QId 0)) q ls
 
 deltaRows :: forall k a. (Typeable k, Typeable a) => k -> QKey k a -> QMap -> [a] -> [(Maybe RawRow, Maybe UpdatedRows)]
 deltaRows k (QKey qid) qmap as = 
@@ -553,11 +550,36 @@ deltaRows k (QKey qid) qmap as =
             merged = M.mergeWithKey (\_ old new -> Just (Just old, Just new)) (M.map (\x -> (Just x, Nothing))) (M.map (\x -> (Nothing, Just x))) oldRows newRows
         in M.elems merged
        _ -> error ("Illegal parer" <> show qid <> ", expected type " <> show (typeOf (undefined :: a)) <> ", got type " <> show (typeOf @a' undefined))
-    where
 
-type RawRow = M.Map String (M.Map String SQLV.SqlValue)
+type VRow = M.Map Col SQLV.SqlValue
+data Step = Delete  VRow | Insert VRow | Update VRow
+  deriving (Eq, Show)
+diffRow :: Maybe RawRow -> Maybe UpdatedRows -> M.Map Int Step
+diffRow (Just r) Nothing = M.map Delete r
+diffRow Nothing Nothing = error "foo"
+diffRow Nothing (Just (UR a)) = M.mapMaybe (\case
+    SetRow x -> Just (Insert x)
+    _ -> Nothing) a
+diffRow (Just a) (Just (UR ms)) = out
+  where
+    -- keep only rhs
+    out :: M.Map Int Step
+    out = M.merge M.dropMissing (M.mapMaybeMissing (\_ -> \case
+      (SetRow x) -> Just (Insert x)
+      _ -> Nothing)) (M.zipWithMaybeMatched inner) a ms
+    inner :: Int -> M.Map Col SQLV.SqlValue -> UpdatedRow -> Maybe Step
+    inner _ x (SetRow b)  =
+      let res = M.merge M.dropMissing M.preserveMissing (M.zipWithMaybeMatched inner2) x b
+      in if M.null res then Nothing else Just (Update b)
+    inner _ xa DeleteRow  = Just (Delete xa)
+    inner2 _ xa b 
+      | xa == b = Nothing
+      | otherwise = Just b
+
+
+type RawRow = M.Map Int (M.Map Col SQLV.SqlValue)
 labelRow :: SQL.Tuple -> M.Map Int UTable -> Row -> RawRow
-labelRow tuple umap row = M.fromListWith (<>) [ (UT.name' table, M.singleton col r) | (t,r) <- zip tuple (V.toList row), Just (Col table col) <- [resolveColumn umap t] ]
+labelRow tuple umap row = M.fromListWith (<>) [ (idx, M.singleton col r) | (t,r) <- zip tuple (V.toList row), Just (idx, col) <- [resolveColumn umap t] ]
 
 
 qmapType :: ResultEntry -> String
