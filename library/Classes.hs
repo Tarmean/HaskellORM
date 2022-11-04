@@ -27,7 +27,7 @@ import Control.Monad.Reader
 
 import Database.Relational.OverloadedInstances ()
 import Entity.Customer ( Customer(custId), customer )
-import Entity.Account ( Account(accountId), account )
+import Entity.Account ( Account(accountId), account, availBalance )
 import qualified Database.Relational.SqlSyntax as SQL
 import qualified Database.Relational.Monad.Trans.Ordering as SQL
 import qualified Database.Relational.Monad.Trans.Restricting as SQL
@@ -65,28 +65,24 @@ instance Semigroup UpdatedRows where
   UR a <> UR b = UR (M.unionWith (<>) a b)
 instance Monoid UpdatedRows where
     mempty = UR M.empty
-data UpdatedRow = DeleteRow | Noop | SetRow [(String, SQLV.SqlValue)]
+data UpdatedRow = DeleteRow | SetRow (M.Map Col SQLV.SqlValue)
     deriving (Show)
 instance Semigroup UpdatedRow where
-    (<>) Noop x = x
-    (<>) x Noop = x
     (<>) DeleteRow DeleteRow = DeleteRow
     (<>) (SetRow a) (SetRow b) = SetRow (a <> b)
     (<>) a b = error $ "UpdatedRow: " <> show a <> " <> " <> show b
-instance Monoid UpdatedRow where
-    mempty = Noop
 type QueryRef = SQL.Qualified Int
 data Updater = Updater {
     runUpdate :: Maybe [(QueryRef, SQLV.SqlValue)] -> UpdatedRow -> UpdateStep,
     propagation :: [(SQL.StringSQL, SQL.StringSQL)]
 }
 
-data Col = Col { colTable :: UTable, colName :: String }
-    deriving (Show)
+data Col = Col { colTable :: String, colName :: String }
+    deriving (Show, Eq, Ord)
 stringSQLToRow :: SQL.SubQuery -> SQL.StringSQL -> Col
 stringSQLToRow sq = \x -> 
   let (a,b) = splitString x
-  in Col (maps M.! a) b
+  in Col (UT.name' (maps M.! a)) b
   where maps = tableMappings sq
 tableMappings :: SQL.SubQuery -> M.Map Int UT.UTable
 tableMappings sq0= case sq0 of
@@ -107,7 +103,9 @@ splitString seque =
 execUpdate :: forall a k. (Typeable a, Typeable k) => k -> [a] -> QKey k a -> QMap -> IO ()
 execUpdate g a k qmap = undefined
   where
-    changes = deltaRows g k qmap a
+    changes :: [M.Map Int Step]
+    changes = fmap (uncurry diffRow) (deltaRows g k qmap a)
+    -- updaters = lookupQMapUpdater k qmap
     applyOne up (Just i, Nothing) = runUpdate up (Just i) DeleteRow
 
 
@@ -317,7 +315,7 @@ runTestQ :: IO [(Account, [Customer])]
 runTestQ = do
     conn <- connectSqlite3 "examples.db"
     (qmap,a) <- runReaderT (runAQuery testQ) conn
-    print (toDeltaRoot a qmap)
+    print (toDeltaRoot (fmap (\(x,y) -> (x{availBalance=fmap(+1) x.availBalance},y)) a) qmap)
     pure a
 
 singular :: [a] -> a
