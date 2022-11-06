@@ -46,6 +46,7 @@ library:
   - free
   - appendmap
   - sql-words
+  - large-anon
   source-dirs: library
 
 executables:

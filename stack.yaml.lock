@@ -77,6 +77,34 @@ packages:
       sha256: 4bec38e7e1cf0fcbadf1b74de16095ee23b9708cd8bad3e26fe63dcf6b2cb066
   original:
     hackage: th-data-compat-0.1.1.0@sha256:b573080b9e5bd6ee517294f8129fe26eab1ce3b896940636a77b330e6aee2411,2698
+- completed:
+    hackage: large-anon-0.1.1@sha256:ee3bc027ef9373ebb6d9f9cf73be68a40cc153b91c133340e583e36388569f0a,5883
+    pantry-tree:
+      size: 5400
+      sha256: 2535166856f97add5f0264d03851a995acd5aa622d72273f952e9ef2df9efa40
+  original:
+    hackage: large-anon-0.1.1@sha256:ee3bc027ef9373ebb6d9f9cf73be68a40cc153b91c133340e583e36388569f0a,5883
+- completed:
+    hackage: ghc-tcplugin-api-0.8.0.0@sha256:46e361987b7c0027b4009ce47d4d9ab7e98a5ab3471204c77f32e1f03e4ce20d,4592
+    pantry-tree:
+      size: 498
+      sha256: 25fa98a61a1c45fcb983791e9fd0a9ce5379123450398881439f762d3582b43a
+  original:
+    hackage: ghc-tcplugin-api-0.8.0.0@sha256:46e361987b7c0027b4009ce47d4d9ab7e98a5ab3471204c77f32e1f03e4ce20d,4592
+- completed:
+    hackage: large-generics-0.2.0.0@sha256:18551694243f5862dd4fc810718fd2e799ec14e330db392a50ef98b1e938191e,2755
+    pantry-tree:
+      size: 1903
+      sha256: aad7a91ef54222ef7ce845b273faa20aa5663abbc86b0dfa19fb6739b34cc99b
+  original:
+    hackage: large-generics-0.2.0.0@sha256:18551694243f5862dd4fc810718fd2e799ec14e330db392a50ef98b1e938191e,2755
+- completed:
+    hackage: typelet-0.1.2@sha256:06f1b2c03095a0963efff6fb686a68c7777d9432bcd62153ce50acf7c6305f4a,2741
+    pantry-tree:
+      size: 834
+      sha256: 27e9884ba20277dc14d8309c1188379cbd8831875b15a51c7ed87cd434a57b09
+  original:
+    hackage: typelet-0.1.2@sha256:06f1b2c03095a0963efff6fb686a68c7777d9432bcd62153ce50acf7c6305f4a,2741
 snapshots:
 - completed:
     size: 646690

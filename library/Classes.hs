@@ -68,17 +68,39 @@ import Data.Maybe (fromMaybe)
 import Data.Foldable (traverse_)
 data UpdateStep = UpsertNow (IO [(SQL.StringSQL, SQLV.SqlValue)]) | DeleteLater (IO ())
 
-data Step = Insert RawRow | Delete RawRow | Update RawRow RawRow
+data Step a = Insert a RawRow | Delete RawRow | Update RawRow a RawRow
   deriving Show
+
+-- recursive \rec -> do
+--    u <- query users
+--    wheres (u.id .=. value 1)
+--    children <- rec u.children
+--    pure (select u & #children .= children)
+
+-- recursive :: QueryM (Record a) (RelationN a a) -> (Record a -> Result [r] -> QueryM (Result r)) -> QueryM (Result r)
+-- recursive2 :: QueryM (Record a) (Relation a a) -> (Record a -> Result r -> QueryM (Result r)) -> QueryM (Result r)
+ -- (\rec r -> do
+ --   o <- r.children
+ --   out <- rec o)
+
+
+-- recursive (query children) #children (\c -> select u & #children .= c)
+-- WITH RECURSIVE u AS (
+--   (SELECT * FROM users WHERE id = 1)
+--   UNION DISTINCT
+--   (SELECT * FROM users WHERE parent_id = u.id)
+-- )
+-- SELECT * FROM u
+    
 
 (!!!) :: (HasCallStack, Ord a) => M.Map a b -> a -> b
 m !!! k = case M.lookup k m of
-  Nothing -> error $ "Key not found: "
+  Nothing -> error "Key not found: "
   Just v -> v
 
-execUpdate :: Updater -> Step -> (Words.Keyword, [SQLV.SqlValue])
+execUpdate :: Updater -> Step a -> (Words.Keyword, [SQLV.SqlValue])
 -- INSERT INTO $table (*columns,) VALUES (*?,) {$args}
-execUpdate _ (Insert r) = (mconcat sql <> cols <> values, M.elems r.values)
+execUpdate _ (Insert _ r) = (mconcat sql <> cols <> values, M.elems r.values)
   where
     sql = [Words.INSERT, Words.INTO, Words.word r.tableName]
     cols = tuple $ map fromString (M.keys (r.values))
@@ -89,7 +111,8 @@ execUpdate _ (Insert r) = (mconcat sql <> cols <> values, M.elems r.values)
 
     sepByComma = foldl1 (Words.|*|)
 -- UPDATE $table SET *$key=?, WHERE *$pkey=? {args <> primary_key_args}
-execUpdate updater (Update l r) = (mconcat sql <> values <> whereClause, M.elems inSet.values <> M.elems inWhere.values)
+execUpdate updater (Update l _ r) 
+  | M.intersection l.values  r.values /= r.values = (mconcat sql <> values <> whereClause, M.elems inSet.values <> M.elems inWhere.values)
   where
     sql = [Words.UPDATE, Words.word r.tableName, Words.SET]
     -- cols = sepByComma [k <> "= ?" | k <- M.keys 
@@ -160,11 +183,6 @@ data Col = Col { fromIdx :: Int, colTable :: String, colName :: String }
 mkCol :: M.Map Int UT.UTable -> Int -> String -> Col
 mkCol ut idx = Col idx (UT.name' (ut !!! idx))
 
-stringSQLToRow :: SQL.SubQuery -> SQL.StringSQL -> Col
-stringSQLToRow sq = \x -> 
-  let (a,b) = splitString x
-  in Col a (UT.name' (maps !!! a)) b
-  where maps = tableMappings sq
 tableMappings :: SQL.SubQuery -> M.Map Int UT.UTable
 tableMappings sq0= case sq0 of
      (SQL.Flat _ _ _ (Just pt) _ _) ->  go pt
@@ -182,22 +200,22 @@ splitString seque =
     _ -> error ("Invalid split input: " <> show seque)
     
   
-diffRow :: Maybe RawRows -> Maybe UpdatedRows -> M.Map Int Step
+diffRow :: forall a. Maybe RawRows -> Maybe (a, UpdatedRows) -> M.Map Int (Step a)
 diffRow (Just (UR r)) Nothing = M.map Delete r
 diffRow Nothing Nothing = error "foo"
-diffRow Nothing (Just (UR a)) = M.mapMaybe (\case
-    Just x -> Just (Insert x)
-    _ -> Nothing) a
-diffRow (Just (UR a)) (Just (UR ms)) = out
+diffRow Nothing (Just (a, UR m)) = M.mapMaybe (\case
+    Just x -> Just (Insert a x)
+    _ -> Nothing) m
+diffRow (Just (UR m)) (Just (a, UR ms)) = out
   where
-    out :: M.Map Int Step
+    out :: M.Map Int (Step a)
     out = M.merge M.dropMissing (M.mapMaybeMissing (\_ -> \case
-      (Just x) -> Just (Insert x)
-      _ -> Nothing)) (M.zipWithMaybeMatched inner) a ms
-    inner :: Int -> RawRow -> Maybe RawRow -> Maybe Step
+      (Just x) -> Just (Insert a x)
+      _ -> Nothing)) (M.zipWithMaybeMatched inner) m ms
+    inner :: Int -> RawRow -> Maybe RawRow -> Maybe (Step a)
     inner _ l@(RawRow t x) (Just r@(RawRow t2 b)) 
       | t /= t2  = error ("trying to diff different table refs: " <> show (t,t2))
-      | M.intersection x b /= b = Just (Update l r)
+      | otherwise = Just (Update l a r)
     inner _ _ _  = Nothing
 
 
@@ -378,13 +396,14 @@ runInsert query a = do
     -- traverse (execUpdate ) out
     undefined -- pure out 
 
-runUpdate :: (Typeable a, Typeable k) => k -> QKey k a -> QMap -> [a] -> IO ()
+runUpdate :: forall a k. (Typeable a, Typeable k) => k -> QKey k a -> QMap -> [a] -> IO ()
 runUpdate k qk qm as = do
     let 
         deltas = deltaRows k qk qm as
-        diffs = concatMap M.elems $ map (uncurry diffRow) deltas
+        diffs = map M.elems $ map (uncurry diffRow) deltas
+        sqls :: [Step a] -> IO ()
         sqls diff = do
-          let sql = execUpdate (lookupQMapUpdater qk qm) diff
+          let sql = map (execUpdate (lookupQMapUpdater qk qm)) diff
           undefined
         inner parentRow a = processChildren parentRow a qk qm
     undefined
@@ -668,17 +687,17 @@ lookupQMapUnparse (QKey qid) qmap = do
        | Just o <- cast (interpReparse p) -> o
        | otherwise -> error ("Illegal parer" <> show qid <> ", expected type " <> show (typeRep @_ @a undefined) <> ", got type ")
 
-toDeltaRoot :: Typeable a => [a] -> QMap -> [(Maybe RawRows, Maybe UpdatedRows)]
+toDeltaRoot :: Typeable a => [a] -> QMap -> [(Maybe RawRows, Maybe (a, UpdatedRows))]
 toDeltaRoot ls q = deltaRows () (QKey (QId 0)) q ls
 
-deltaRows :: forall k a. (Typeable k, Typeable a) => k -> QKey k a -> QMap -> [a] -> [(Maybe RawRows, Maybe UpdatedRows)]
+deltaRows :: forall k a. (Typeable k, Typeable a) => k -> QKey k a -> QMap -> [a] -> [(Maybe RawRows, Maybe (a, UpdatedRows))]
 deltaRows k (QKey qid) qmap as = 
    case qmap.unQMap !!! qid of
      ResultEntry @_ @k' @a' v res _ utab -> case (eqT @k @k', eqT @a @a') of
        (Just Refl, Just Refl) -> let
             (rowParser, groupVal, unParse, tuples) = (interpParser (fmap fst res), interpReparse (fmap fst res), interpPrinter utab res, interpTuple res)
             oldRows = M.fromList [(runRowParser rowParser qmap e, labelRow tuples utab e) | e <- V.toList (v !!! k) ]
-            newRows = M.fromList [ (groupVal a, row) | a <- as, let row = unParse a ]
+            newRows = M.fromList [ (groupVal a, (a, row)) | a <- as, let row = unParse a ]
             merged = M.mergeWithKey (\_ old new -> Just (Just old, Just new)) (M.map (\x -> (Just x, Nothing))) (M.map (\x -> (Nothing, Just x))) oldRows newRows
         in M.elems merged
        _ -> error ("Illegal parer" <> show qid <> ", expected type " <> show (typeRep @_ @a undefined) <> ", got type " <> show (typeOf @a' undefined))
