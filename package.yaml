@@ -47,6 +47,7 @@ library:
   - appendmap
   - sql-words
   - large-anon
+  - time
   source-dirs: library
 
 executables:

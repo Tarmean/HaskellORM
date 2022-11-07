@@ -30,7 +30,7 @@ import Control.Monad.Reader
 
 import Database.Relational.OverloadedInstances ()
 import Entity.Customer ( Customer(custId), customer )
-import Entity.Account ( Account(accountId), account, availBalance )
+import Entity.Account ( Account(..), account, availBalance )
 import qualified Database.Relational.SqlSyntax as SQL
 import qualified Database.Relational.Monad.Trans.Ordering as SQL
 import qualified Database.Relational.Monad.Trans.Restricting as SQL
@@ -66,10 +66,39 @@ import qualified Database.Relational.Table as Table
 import qualified Language.SQL.Keyword.Concat as Words
 import Data.Maybe (fromMaybe)
 import Data.Foldable (traverse_)
+import qualified Database.HDBC as HDBC
+import qualified Data.List as List
+import Data.Time.Calendar (Day)
+import Data.Time (utctDay)
+import Data.Time.Clock (getCurrentTime)
 data UpdateStep = UpsertNow (IO [(SQL.StringSQL, SQLV.SqlValue)]) | DeleteLater (IO ())
-
-data Step a = Insert a RawRow | Delete RawRow | Update RawRow a RawRow
+data Step = Insert RawRow | Delete RawRow | Update RawRow RawRow
   deriving Show
+
+-- data Lang = ForLoop Ident Expr (Lang)
+-- data Lang = NonEmpty (Ident, Expr)
+-- -- for each row give me the minimum of all preceding rows
+-- mins :: (QA a, TA a, Ord a) => Q [a] -> Q [a]
+-- mins xs = Q.do
+--     (view -> (_, i)) <- number xs
+--     minimum Q.do
+--         (view -> (y, j)) <- number xs
+--         guard (j <= i)
+--         pure y
+
+-- margins :: (Ord a, Num (Q a), QA a, TA a) => Q [a] -> Q [a]
+-- margins xs = Q.do 
+--     (view -> (x,y)) <- zip xs (mins xs)
+--     pure (x - y)
+--
+--SQL:
+--
+--
+--t_price - min(t_price) over
+--                (partition by t_tid, t_tradedate
+-- 	        order by t_timestamp
+--                 rows unbounded preceding)
+--                as running_diff
 
 -- recursive \rec -> do
 --    u <- query users
@@ -98,12 +127,12 @@ m !!! k = case M.lookup k m of
   Nothing -> error "Key not found: "
   Just v -> v
 
-execUpdate :: Updater -> Step a -> (Words.Keyword, [SQLV.SqlValue])
+execUpdate :: Updater -> Step -> (Words.Keyword, [String], [SQLV.SqlValue])
 -- INSERT INTO $table (*columns,) VALUES (*?,) {$args}
-execUpdate _ (Insert _ r) = (mconcat sql <> cols <> values, M.elems r.values)
+execUpdate _ (Insert r) = (mconcat sql <> cols <> values, M.keys r.values, M.elems r.values)
   where
     sql = [Words.INSERT, Words.INTO, Words.word r.tableName]
-    cols = tuple $ map fromString (M.keys (r.values))
+    cols = tuple $ map fromString (M.keys r.values)
     values = Words.VALUES <> tuple (replicate (M.size r.values) "?")
     parens a = "(" Words.<++> a Words.<++> ")"
     tuple = parens . sepByComma
@@ -111,8 +140,8 @@ execUpdate _ (Insert _ r) = (mconcat sql <> cols <> values, M.elems r.values)
 
     sepByComma = foldl1 (Words.|*|)
 -- UPDATE $table SET *$key=?, WHERE *$pkey=? {args <> primary_key_args}
-execUpdate updater (Update l _ r) 
-  | M.intersection l.values  r.values /= r.values = (mconcat sql <> values <> whereClause, M.elems inSet.values <> M.elems inWhere.values)
+execUpdate updater (Update l r) 
+  | M.intersection l.values  r.values /= r.values = (mconcat sql <> values <> whereClause, [], M.elems inSet.values <> M.elems inWhere.values)
   where
     sql = [Words.UPDATE, Words.word r.tableName, Words.SET]
     -- cols = sepByComma [k <> "= ?" | k <- M.keys 
@@ -126,7 +155,7 @@ execUpdate updater (Update l _ r)
     (inWhere, _) = splitRow updater r
 
     sepByComma = foldl1 (Words.|*|)
-execUpdate _ _ = (mempty, mempty)
+execUpdate _ _ = (mempty, [], mempty)
 
 critColumns :: MetaData -> S.Set String
 critColumns md = S.fromList [Words.wordShow col | (idx, col) <- zip [0..] cols, idx `elem` primIdxs]
@@ -200,22 +229,22 @@ splitString seque =
     _ -> error ("Invalid split input: " <> show seque)
     
   
-diffRow :: forall a. Maybe RawRows -> Maybe (a, UpdatedRows) -> M.Map Int (Step a)
+diffRow :: forall a. Maybe RawRows -> Maybe (a, UpdatedRows) -> M.Map Int Step
 diffRow (Just (UR r)) Nothing = M.map Delete r
 diffRow Nothing Nothing = error "foo"
-diffRow Nothing (Just (a, UR m)) = M.mapMaybe (\case
-    Just x -> Just (Insert a x)
+diffRow Nothing (Just (_a, UR m)) = M.mapMaybe (\case
+    Just x -> Just (Insert x)
     _ -> Nothing) m
-diffRow (Just (UR m)) (Just (a, UR ms)) = out
+diffRow (Just (UR m)) (Just (_a, UR ms)) = out
   where
-    out :: M.Map Int (Step a)
+    out :: M.Map Int Step
     out = M.merge M.dropMissing (M.mapMaybeMissing (\_ -> \case
-      (Just x) -> Just (Insert a x)
+      (Just x) -> Just (Insert x)
       _ -> Nothing)) (M.zipWithMaybeMatched inner) m ms
-    inner :: Int -> RawRow -> Maybe RawRow -> Maybe (Step a)
-    inner _ l@(RawRow t x) (Just r@(RawRow t2 b)) 
-      | t /= t2  = error ("trying to diff different table refs: " <> show (t,t2))
-      | otherwise = Just (Update l a r)
+    inner :: Int -> RawRow -> Maybe RawRow -> Maybe Step
+    inner _ l (Just r) 
+      | l.tableName /= r.tableName  = error ("trying to diff different table refs: " <> show (l, r))
+      | otherwise = Just (Update l r)
     inner _ _ _  = Nothing
 
 
@@ -387,28 +416,66 @@ runQueryM id0 (QueryM q) = out
       pure (queryState,res)
     out = SQL.configureQuery (toSubQuery ns) SQL.defaultConfig
 
-runInsert :: (Ord r, Typeable r, Typeable a) => QueryM SQL.Flat (Result' a (k, (r, a))) -> [a] -> IO ()
-runInsert query a = do
-    (QS {qidGen = idx', updaters=upds},sql,res) <- pure $ runQueryM 1 query
-    let QMap qmap = evalState (interpWOQueries res) 0
-        out = QMap $ M.insert (QId 0 ) (ResultEntry (M.empty @()) (fmap snd res) upds (tableMappings sql)) qmap
-        diffs = concatMap M.elems $ map (uncurry diffRow) (toDeltaRoot a out) 
-    -- traverse (execUpdate ) out
-    undefined -- pure out 
 
-runUpdate :: forall a k. (Typeable a, Typeable k) => k -> QKey k a -> QMap -> [a] -> IO ()
+runUpdate :: forall a k m. (ExecQuery m, Typeable a, Typeable k) => k -> QKey k a -> QMap -> [a] -> m ()
 runUpdate k qk qm as = do
-    let 
-        deltas = deltaRows k qk qm as
-        diffs = map M.elems $ map (uncurry diffRow) deltas
-        sqls :: [Step a] -> IO ()
-        sqls diff = do
-          let sql = map (execUpdate (lookupQMapUpdater qk qm)) diff
-          undefined
-        inner parentRow a = processChildren parentRow a qk qm
-    undefined
+    let deltas = deltaRows k qk qm as
+    execChanges deltas qk qm
+runInsert :: forall a k m. (ExecQuery m, Typeable a) => QKey k a -> QMap -> [a] -> m ()
+runInsert qk qm as = do
+    let
+       unparse = case qm.unQMap !!! qk.theId of
+         ResultEntry @_ @_ @a' _ res _ utab -> case (eqT @a @a') of
+           Just Refl -> interpPrinter utab res
+           _ -> error "runInsert: type error"
+       deltas = [(Nothing, Just (a, unparse a)) | a <- as]
+    execChanges deltas qk qm
+execChanges :: forall a k m. (ExecQuery m, Typeable a) => [(Maybe RawRows, Maybe (a, UpdatedRows))] -> QKey k a -> QMap -> m ()
+execChanges deltas qk qm = mapM_ (uncurry sqls) deltas
+  where
+    upd = lookupQMapUpdater qk qm
+    isDelete Delete {} = True
+    isDelete _ = False
+    sqls :: Maybe RawRows -> Maybe (a, UpdatedRows) -> m (M.Map Int (M.Map String HDBC.SqlValue))
+    sqls old new = flip execStateT mempty do
+        let a0 = diffRow old new
+        let (lhs, rhs) = List.partition (isDelete . snd) (M.toList a0)
+        traverse_ go (reverse rhs)
+        case (old, new) of
+          (Just row, Just (val, _)) -> lift (processChildren @m row val qk qm)
+          (Nothing, Just (val, _)) -> lift (insertChildren @m val qk qm)
+          _ -> pure ()
+        traverse_ go lhs
+    go (idx::Int,x) = do
+      overlay <- get
+      let (kw, cols, args) = execUpdate upd (applyOver (M.findWithDefault mempty idx overlay) x)
+      error ("MODIFICATION: " <> Words.wordShow kw <> ", " <> show args)
+      out <- execRawQuery (Words.wordShow kw) args
+      case out of
+        [a] -> 
+          put $ M.insertWith M.union idx (M.fromList $ zip cols a) overlay
+        [] -> pure ()
+        _ -> error "runUpdate: too many rows"
+    inner parentRow a = processChildren @m parentRow a qk qm
+
+applyOver :: M.Map String HDBC.SqlValue -> Step -> Step
+applyOver m (Insert r) = Insert (r { values = M.union m r.values })
+applyOver m (Update l r) = Update l (r { values = M.union m r.values })
+applyOver _ d@Delete{} = d
     
-processChildren :: Typeable a => RawRows -> a -> QKey k a -> QMap -> IO ()
+-- FIXME: the newly generated ID's currently aren'T propagated
+insertChildren :: (ExecQuery m, Typeable a) => a -> QKey k a -> QMap -> m ()
+insertChildren a qk qm = traverse_ (uncurry step) (M.toList children)
+  where
+    result = lookupQMapResult qk qm
+    VMap children = interpChildren result a
+
+    -- deps = interpRefs row result
+    step qid dynamic = case qm.unQMap !!! qid of
+      ResultEntry {resultReader = _ :: Result' b (r,b), resultData = _ :: M.Map k' (V.Vector Row)}  
+        | Just as' <- fromDynamic @[b] dynamic -> runInsert (QKey qid) qm as'
+      _ -> error "Illegal step"
+processChildren :: (ExecQuery m, Typeable a) => RawRows -> a -> QKey k a -> QMap -> m ()
 processChildren row a qk qm = traverse_ (uncurry step) (M.toList children)
   where
     result = lookupQMapResult qk qm
@@ -422,13 +489,17 @@ processChildren row a qk qm = traverse_ (uncurry step) (M.toList children)
         runUpdate k (QKey qid) qm as'
       _ -> error "Illegal step"
 
+today :: IO Day
+today = utctDay <$> getCurrentTime
 runTestQ :: IO [(Account, [Customer])]
 runTestQ = do
     conn <- connectSqlite3 "examples.db"
     (qmap,a) <- runReaderT (runAQuery testQ) conn
+    date <- today
     let out = concatMap M.elems (uncurry diffRow <$> toDeltaRoot (fmap (\(x,y) -> (x{availBalance=fmap(+1) x.availBalance},y)) a) qmap)
         upd = lookupQMapUpdater (QKey $ QId 0) qmap 
-    mapM_ print $ execUpdate upd <$> out
+    flip runReaderT conn $ runInsert (QKey (QId 0)) qmap [(Account 0 "foo" 2 date Nothing Nothing "blar" Nothing Nothing Nothing Nothing, []::[Customer])]
+    -- mapM_ print $ execUpdate upd <$> out
     pure []
     -- pure a
 
@@ -606,6 +677,7 @@ instance SQLV.FromSql SQLV.SqlValue Row where
 
 class Monad m => ExecQuery m where
     execQuery :: SQL.SubQuery -> m [Row]
+    execRawQuery :: String -> [SQLV.SqlValue] -> m [[SQLV.SqlValue]]
 instance (HDBC.IConnection conn) => ExecQuery (ReaderT conn IO) where
     execQuery q = do
         conn <- ask
@@ -615,8 +687,12 @@ instance (HDBC.IConnection conn) => ExecQuery (ReaderT conn IO) where
         rel = SQL.unsafeTypeRelation (pure q)
         query :: Rel.Query () Row
         query = Rel.relationalQuery_ SQL.defaultConfig{SQL.schemaNameMode = SQL.SchemaNotQualified} rel  []
+    execRawQuery s args = do
+        conn <- ask
+        liftIO $ HDBC.quickQuery' conn s args
 instance (Monad m, ExecQuery m) => ExecQuery (StateT s m) where
     execQuery = lift . execQuery
+    execRawQuery str args = lift (execRawQuery str args)
 
 mkGrouping :: (Ord k) => RowParser k -> [Row] -> M.Map k (V.Vector Row)
 mkGrouping kp rows = M.map (V.fromList . flip appEndo []) $ M.fromListWith (<>) [(runKeyParser kp row, Endo (row:))| row <- rows]
