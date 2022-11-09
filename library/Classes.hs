@@ -18,6 +18,8 @@
 {-# OPTIONS_GHC -Wno-orphans #-}
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 {-# HLINT ignore "Use record patterns" #-}
+{-# LANGUAGE PartialTypeSignatures #-}
+{-# OPTIONS_GHC -Wno-partial-type-signatures #-}
 module Classes where
 import GHC.Stack (HasCallStack)
 import Database.HDBC.Sqlite3 (connectSqlite3)
@@ -29,7 +31,7 @@ import Control.Monad.State.Strict
 import Control.Monad.Reader
 
 import Database.Relational.OverloadedInstances ()
-import Entity.Customer ( Customer(custId), customer )
+import Entity.Customer ( Customer(..), customer )
 import Entity.Account ( Account(..), account, availBalance )
 import qualified Database.Relational.SqlSyntax as SQL
 import qualified Database.Relational.Monad.Trans.Ordering as SQL
@@ -64,7 +66,7 @@ import qualified Data.Map.Merge.Strict as M
 import qualified Database.Record.KeyConstraint as CK
 import qualified Database.Relational.Table as Table
 import qualified Language.SQL.Keyword.Concat as Words
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, fromJust)
 import Data.Foldable (traverse_)
 import qualified Database.HDBC as HDBC
 import qualified Data.List as List
@@ -126,6 +128,10 @@ data Step = Insert RawRow | Delete RawRow | Update RawRow RawRow
 (!!!) :: (HasCallStack, Ord a) => M.Map a b -> a -> b
 m !!! k = case M.lookup k m of
   Nothing -> error "Key not found: "
+  Just v -> v
+(!!!!) :: (Show a, Show b, HasCallStack, Ord a) => M.Map a b -> a -> b
+m !!!! k = case M.lookup k m of
+  Nothing -> error ("Key not found: " <> show (k, m))
   Just v -> v
 
 execUpdate :: Updater -> Step -> (Words.Keyword, [String], [SQLV.SqlValue])
@@ -212,10 +218,8 @@ tableData = MD ut pk
     ut = Table.untype (SQL.derivedTable @a)
     pk = thePrimaryKey @a
 
-data Col = Col { idx :: Int, table :: String, name :: String }
+data Col = Col { idx :: Int, name :: String }
     deriving (Show, Eq, Ord)
-mkCol :: M.Map Int UT.UTable -> Int -> String -> Col
-mkCol ut idx = Col idx (UT.name' (ut !!! idx))
 
 tableMappings :: SQL.SubQuery -> M.Map Int UT.UTable
 tableMappings sq0= case sq0 of
@@ -343,13 +347,14 @@ mkJoin cfg parse =
      tellMetadata @b
      child <- SQL.query cfg.joinTarget 
      let key = child SQL.!  cfg.joinKeyR 
+     tellParentDep cfg.joinOrigin key
      SQL.wheres (SQL.in' key (SQL.values row))
      res <- parse child
-     pure $ liftA2 (,) (undefined =. sel key) res
+     pure $ liftA2 (,) (fst =. sel key) (snd =. res)
 
 type UnParse r = r -> [(SQL.Column, SQLV.SqlValue)]
 
-nested :: (Show k, Typeable a, Typeable k, Ord k, Typeable r, Ord r) => Result k -> ([k] -> QueryM SQL.Flat (Result' a (k, (r, a)))) -> QueryM m (Result' [a] [a])
+nested :: (Show k, Typeable a, Typeable k, Ord k, Typeable r, Ord r) => Result k -> ([k] -> QueryM SQL.Flat (Result' (k, a) (k, (r, a)))) -> QueryM m (Result' [a] [a])
 nested parentKey cb = do
    qid <- genQId
    pure $ liftAp $ NestedQ {
@@ -366,6 +371,13 @@ genQId = do
 tellMetadata :: forall a m. (CK.HasColumnConstraint CK.Primary a, SQL.TableDerivable a) => QueryM m ()
 tellMetadata = modify $ \s -> s { updaters = Updater (M.singleton (UT.name' td.table) td) mempty mempty <> s.updaters }
   where td = tableData @a
+
+tellParentDep :: Record.Record SQL.Flat a -> Record.Record SQL.Flat a -> QueryM m ()
+tellParentDep l r = do
+  modify $ \s -> s { updaters = s.updaters { parentPropagation = s.updaters.parentPropagation <> zip (map (fromJust . resolveColumn) $ Record.untype l) (map (fromJust . resolveColumn) $ Record.untype r) } }
+   
+
+
 sel :: forall a c. (HasCallStack, SQLV.FromSql SQLV.SqlValue a, SQLP.PersistableWidth a, Record.ToSql HDBC.SqlValue a) => SQL.Record c a -> Result' a a
 sel rec 
   | wid /= length (Record.untype rec) = error "sel: too many columns"
@@ -383,10 +395,10 @@ sel rec
     r off v = SQLV.toRecord $ V.toList (sliceVector off wid v)
     decRows m a = decideUpdatesDefault (Record.untype rec) m (Record.runFromRecord Record.recordToSql a :: [SQLV.SqlValue])
 
-resolveColumn :: M.Map Int UTable -> SQL.Column -> Maybe Col
-resolveColumn utab (SQL.RawColumn s) = Just $ Col a (UT.name' $ utab !!! a) b
+resolveColumn :: SQL.Column -> Maybe Col
+resolveColumn (SQL.RawColumn s) = Just $ Col a b
   where (a,b) = splitString s
-resolveColumn _ _ = Nothing
+resolveColumn _ = Nothing
 decideUpdatesDefault :: SQL.Tuple -> M.Map Int UTable -> [HDBC.SqlValue] -> UpdatedRows
 decideUpdatesDefault tups m vals = UR $ M.fromListWith (<>) $ do
     (SQL.RawColumn str, val) <- zip tups vals
@@ -424,17 +436,17 @@ runQueryM id0 (QueryM q) = out
 runUpdate :: forall a k m. (ExecQuery m, Typeable a, Typeable k) => k -> QKey k a -> QMap -> [a] -> m ()
 runUpdate k qk qm as = do
     let deltas = deltaRows k qk qm as
-    execChanges deltas qk qm
-runInsert :: forall a k m. (ExecQuery m, Typeable a) => RawRows -> QKey k a -> QMap -> [a] -> m ()
-runInsert ctx  qk qm as = do
+    execChanges k deltas qk qm
+runInsert :: forall a k m. (ExecQuery m, Typeable a, Typeable k) => k -> QKey k a -> QMap -> [a] -> m ()
+runInsert k qk qm as = do
     let
-       unparse :: a -> UpdatedRows
+       unparse :: (k,a) -> UpdatedRows
        unparse = case qm.unQMap !!! qk.theId of
-         ResultEntry @_ @_ @a' _ res _ utab -> case (eqT @a @a') of
-           Just Refl -> interpPrinter utab res
+         ResultEntry @_ @k' @a' _ res _ utab -> case (eqT @a @a', eqT @k @k') of
+           (Just Refl, Just Refl) -> interpPrinter utab res
            _ -> error "runInsert: type error"
-       deltas = [(Nothing, Just (a, addContext ctx (unparse a))) | a <- as]
-    execChanges deltas qk qm
+       deltas = [(Nothing, Just (a, unparse (k, a))) | a <- as]
+    execChanges k deltas qk qm
 
 addContext :: RawRows -> UpdatedRows -> UpdatedRows
 addContext raw upd = UR (M.merge M.dropMissing M.preserveMissing (M.zipWithMatched step) raw.get upd.get)
@@ -444,8 +456,10 @@ addContext raw upd = UR (M.merge M.dropMissing M.preserveMissing (M.zipWithMatch
     step _ l (Just r) = Just r { values = M.union l.values r.values }
     step _ _ Nothing = Nothing
 
-execChanges :: forall a k m. (ExecQuery m, Typeable a) => [(Maybe RawRows, Maybe (a, UpdatedRows))] -> QKey k a -> QMap -> m ()
-execChanges deltas qk qm = mapM_ (uncurry sqls) deltas
+insertedRows :: UpdatedRows -> RawRows
+insertedRows (UR m) = UR $ M.mapMaybe id m
+execChanges :: forall a k m. (ExecQuery m, Typeable a, Typeable k) => k -> [(Maybe RawRows, Maybe (a, UpdatedRows))] -> QKey k a -> QMap -> m ()
+execChanges k deltas qk qm = mapM_ (uncurry sqls) deltas
   where
     upd = lookupQMapUpdater qk qm
     isDelete Delete {} = True
@@ -458,8 +472,8 @@ execChanges deltas qk qm = mapM_ (uncurry sqls) deltas
         deps0 <- get
         let deps = propagateUpdate upd mempty deps0 
         case (old, new) of
-          (Just row, Just (val, _)) -> lift (processChildren @m (addUpdates (coerce deps) row) val qk qm)
-          (Nothing, Just (val, _)) -> lift (insertChildren @m (coerce deps) val qk qm)
+          (Just row, Just (val, _)) -> lift (processChildren @m k (addUpdates (coerce deps) row) val qk qm)
+          (Nothing, Just (val, rowm)) -> lift (insertChildren @m k (addUpdates (coerce deps) (insertedRows rowm)) val qk qm)
           _ -> pure ()
         traverse_ go lhs
     go (idx::Int,x) = do
@@ -486,18 +500,22 @@ propagateSelf up inp = foldr step inp up.propagation
     lookupCol :: Col -> M.Map Int RawRow -> Maybe HDBC.SqlValue
     lookupCol col m = M.lookup col.idx m >>= M.lookup col.name . (.values)
     setCol :: Col -> HDBC.SqlValue -> M.Map Int RawRow -> M.Map Int RawRow
-    setCol col val = M.insertWith (<>) col.idx (RawRow col.table (M.singleton col.name val))
+    setCol col val = M.insertWith (<>) col.idx (RawRow (tableName col.idx) (M.singleton col.name val))
+    tableName :: Int -> String
+    tableName idx = (inp !!! idx).tableName
 propagateUpdate :: Updater -> M.Map Int RawRow -> M.Map Int RawRow -> M.Map Int RawRow
 propagateUpdate up parent inp = foldr step inp up.propagation
   where
     step :: (Col, Col) -> M.Map Int RawRow -> M.Map Int RawRow
-    step (l, r) m = case lookupCol l m of
+    step (l, r) m = case lookupCol l of
       Nothing -> m
       Just v -> setCol r v m
-    lookupCol :: Col -> M.Map Int RawRow -> Maybe HDBC.SqlValue
-    lookupCol col m = M.lookup col.idx parent >>= M.lookup col.name . (.values)
+    lookupCol :: Col -> Maybe HDBC.SqlValue
+    lookupCol col = M.lookup col.idx parent >>= M.lookup col.name . (.values)
     setCol :: Col -> HDBC.SqlValue -> M.Map Int RawRow -> M.Map Int RawRow
-    setCol col val = M.insertWith (<>) col.idx (RawRow col.table (M.singleton col.name val))
+    setCol col val = M.insertWith (<>) col.idx (RawRow (tableName col.idx) (M.singleton col.name val))
+    tableName :: Int -> String
+    tableName idx = (inp !!! idx).tableName
 
 applyOver :: M.Map String HDBC.SqlValue -> Step -> Step
 applyOver m (Insert r) = Insert (r { values = M.union m r.values })
@@ -505,29 +523,30 @@ applyOver m (Update l r) = Update l (r { values = M.union m r.values })
 applyOver _ d@Delete{} = d
     
 -- FIXME: the newly generated ID's currently aren'T propagated
-insertChildren :: (ExecQuery m, Typeable a) => RawRows -> a -> QKey k a -> QMap -> m ()
-insertChildren ctx a qk qm = traverse_ (uncurry step) (M.toList children)
+insertChildren :: (ExecQuery m, Typeable a, Typeable k) => k -> RawRows -> a -> QKey k a -> QMap -> m ()
+insertChildren k ctx a qk qm = traverse_ (uncurry step) (M.toList children)
   where
     result = lookupQMapResult qk qm
-    VMap children = interpChildren result a
+    VMap children = interpChildren result (k, a)
 
-    -- deps = interpRefs row result
+    deps = interpRefs ctx result
     step qid dynamic = case qm.unQMap !!! qid of
-      ResultEntry {resultReader = _ :: Result' b (r,b), resultData = _ :: M.Map k' (V.Vector Row)}  
-        | Just as' <- fromDynamic @[b] dynamic -> runInsert ctx (QKey qid) qm as'
+      ResultEntry {resultReader = _ :: Result' (k', b) (r,b)}  
+        | Just as' <- fromDynamic @[b] dynamic
+        , Just k' <- fromDynamic @k' (deps !!! qid)
+        -> runInsert k' (QKey qid) qm as'
       _ -> error "Illegal step"
-processChildren :: (ExecQuery m, Typeable a) => RawRows -> a -> QKey k a -> QMap -> m ()
-processChildren row a qk qm = traverse_ (uncurry step) (M.toList children)
+processChildren :: forall m k a. (ExecQuery m, Typeable a, Typeable k) => k -> RawRows -> a -> QKey k a -> QMap -> m ()
+processChildren k row a qk qm = traverse_ (uncurry step) (M.toList children)
   where
     result = lookupQMapResult qk qm
-    VMap children = interpChildren result a
+    VMap children = interpChildren result (k, a)
 
     deps = interpRefs row result
     step qid dynamic = case qm.unQMap !!! qid of
-      ResultEntry {resultReader = _ :: Result' b (r,b), resultData = _ :: M.Map k' (V.Vector Row)}  
+      ResultEntry {resultReader = _ :: Result' (k',b) (r,b)}  
         | Just as' <- fromDynamic @[b] dynamic
-        , Just k <- fromDynamic @k' (deps M.! qid) -> do
-        runUpdate k (QKey qid) qm as'
+        , Just k' <- fromDynamic @k' (deps !!! qid) -> runUpdate k' (QKey qid) qm as'
       _ -> error "Illegal step"
 
 today :: IO Day
@@ -539,21 +558,22 @@ runTestQ = do
     date <- today
     let -- out = concatMap M.elems (uncurry diffRow <$> toDeltaRoot (fmap (\(x,y) -> (x{availBalance=fmap(+1) x.availBalance},y)) a) qmap)
         upd = lookupQMapUpdater (QKey $ QId 0) qmap 
-    flip runReaderT conn $ runInsert (UR mempty) (QKey (QId 0)) qmap [(Account 500 "ACTIVE" 2 date Nothing Nothing "ACTIVE" Nothing Nothing Nothing Nothing, []::[Customer])]
-    -- mapM_ print $ execUpdate upd <$> out
+    flip runReaderT conn $ runInsert () (QKey (QId 0)) qmap [(Account 500 "ACTIVE" 2 date Nothing Nothing "ACTIVE" Nothing Nothing Nothing Nothing, [Customer 999 "999-44-5555" "I" (Just "Home sweet home home") Nothing Nothing Nothing]::[Customer])]
+    (qmap,a) <- runReaderT (runAQuery testQ) conn
     -- pure []
+    HDBC.rollback conn
     pure a
 
 singular :: [a] -> a
 singular [a] = a
 singular _ = error "Invalid query"
 
-asRoot :: QueryM SQL.Flat (Result' r a) -> QueryM SQL.Flat (Result' r ((), a))
-asRoot = fmap (fmap ((),))
+-- asRoot :: QueryM SQL.Flat (Result' r a) -> QueryM SQL.Flat (Result' r (), a))
+-- asRoot = fmap (\x -> fmap ((),) x)
 
 runAQuery :: (Typeable a, ExecQuery m, Typeable r, Ord r) => QueryM SQL.Flat (Result' a (r, a)) -> m (QMap, [a])
 runAQuery q = do
-   qmap <- loadNested (asRoot q)
+   qmap <- loadNested q
    pure (qmap, runParserRoot qmap)
 
 liftConfig :: SQL.ConfigureQuery a -> M a
@@ -605,7 +625,7 @@ data ResultF x a where
     NestedQ :: (Typeable r, Ord r, Show k, Ord k, Typeable k, Typeable a) => 
       {  keyParser :: Ap ResultF k k, -- ^ lookup join key for the parent
          nestedKey :: QKey k a,
-         nestedQuery :: [k] -> QueryM SQL.Flat (Ap ResultF a (k, (r, a)))
+         nestedQuery :: [k] -> QueryM SQL.Flat (Ap ResultF (k,a) (k, (r, a)))
       } -> ResultF [a] [a]
     ParseQ :: { cols :: SQL.Tuple, colPrinter ::  M.Map Int UTable -> a -> UpdatedRows , colParser :: RowParser a } -> ResultF a a
     -- UpdateQ :: {
@@ -665,17 +685,17 @@ interpQueries dm = Monoid.getAp . runAp_ (\case
        let here = ResultEntry (mkGrouping childKey outv) (fmap snd res) updates (tableMappings sql)
        pure $ QMap (M.insert qid.theId here inner)
     ParseQ {} ->  mempty)
-interpWOQueries :: Monad m => Result' x a -> StateT Int m QMap
-interpWOQueries = Monoid.getAp . runAp_ (\case
-    NestedQ  {nestedKey = qid, nestedQuery = query } -> Monoid.Ap $ do
-       let dat = mempty
-       idx <- get
-       (QS {qidGen = idx', updaters=updates},sql, res) <- pure $ runQueryM idx (query dat)
-       put idx'
-       QMap inner <- interpWOQueries res
-       let here = ResultEntry (mempty :: M.Map () (V.Vector Row)) (fmap snd res) updates (tableMappings sql)
-       pure $ QMap (M.insert qid.theId here inner)
-    ParseQ {} ->  mempty)
+-- interpWOQueries :: Monad m => Result' x a -> StateT Int m QMap
+-- interpWOQueries = Monoid.getAp . runAp_ (\case
+--     NestedQ  {nestedKey = qid, nestedQuery = query } -> Monoid.Ap $ do
+--        let dat = mempty
+--        idx <- get
+--        (QS {qidGen = idx', updaters=updates},sql, res) <- pure $ runQueryM idx (query dat)
+--        put idx'
+--        QMap inner <- interpWOQueries res
+--        let here = ResultEntry (mempty :: M.Map () (V.Vector Row)) (fmap snd res) updates (tableMappings sql)
+--        pure $ QMap (M.insert qid.theId here inner)
+--     ParseQ {} ->  mempty)
 
 interpRawParser :: Result' x a -> RawRows -> a
 interpRawParser a m =  runIdentity $ runAp (\case
@@ -684,8 +704,8 @@ interpRawParser a m =  runIdentity $ runAp (\case
       let vec = V.fromList $ map (lookupRawRow m) cols
       in Identity (runKeyParser colParser vec)) a
 
-lookupRawRow :: RawRows -> SQL.Column -> HDBC.SqlValue
-lookupRawRow (UR raw) (SQL.RawColumn s) = (raw M.! a).values M.! b
+lookupRawRow :: HasCallStack => RawRows -> SQL.Column -> HDBC.SqlValue
+lookupRawRow (UR raw) (SQL.RawColumn s) = (raw !!!! a).values !!!! b
   where (a,b) = splitString s
 lookupRawRow _ _ = error "boo"
 
@@ -710,7 +730,7 @@ interpPrinter :: M.Map Int UT.UTable -> Result' r a -> r -> UpdatedRows
 interpPrinter m = runBAp_ $ \x -> \case
     NestedQ {} -> mempty
     ParseQ  {colPrinter=prnt} -> prnt m x
-interpChildren :: Result' a a -> a -> VMap
+interpChildren :: Result' b a -> b -> VMap
 interpChildren = runBAp_ $ \x -> \case
     NestedQ {nestedKey=v} -> VMap (M.singleton v.theId  (toDyn x))
     ParseQ _ _ _ -> mempty
@@ -726,7 +746,9 @@ class Monad m => ExecQuery m where
 instance (HDBC.IConnection conn) => ExecQuery (ReaderT conn IO) where
     execQuery q = do
         conn <- ask
-        liftIO $ SQLV.runQuery conn query ()
+        out <- liftIO $ SQLV.runQuery conn query ()
+        liftIO $ print (query, out)
+        pure out
       where
         rel :: SQL.Relation () Row
         rel = SQL.unsafeTypeRelation (pure q)
@@ -745,7 +767,7 @@ mkGrouping :: (Ord k) => RowParser k -> [Row] -> M.Map k (V.Vector Row)
 mkGrouping kp rows = M.map (V.fromList . flip appEndo []) $ M.fromListWith (<>) [(runKeyParser kp row, Endo (row:))| row <- rows]
 
 
-data ResultEntry = forall r k a. (Ord r, Typeable r, Typeable k, Ord k, Typeable a) => ResultEntry { resultData :: M.Map k (V.Vector Row), resultReader :: Result' a (r, a), resultWriter :: Updater, resultMappings :: M.Map Int UT.UTable }
+data ResultEntry = forall r k a. (Ord r, Typeable r, Typeable k, Ord k, Typeable a) => ResultEntry { resultData :: M.Map k (V.Vector Row), resultReader :: Result' (k,a) (r, a), resultWriter :: Updater, resultMappings :: M.Map Int UT.UTable }
 unResultEntry1 :: (Typeable k) => ResultEntry -> Maybe (M.Map k (V.Vector Row))
 unResultEntry1 (ResultEntry {resultData}) = cast resultData
 
@@ -794,26 +816,26 @@ lookupQMapParser (QKey qid) qmap = do
    case qmap.unQMap !!! qid of
      ResultEntry {resultReader=resultReader}
        | Just o <- cast (fmap snd (interpParser resultReader)) -> o
-       | otherwise -> error ("Illegal parer" <> show qid <> ", expected type " <> show (typeRep @_ @a undefined) <> ", got type ")
+       | otherwise -> error ("Illegal parser " <> show qid <> ", expected type " <> show (typeRep @_ @a undefined) <> ", got type ")
 
-lookupQMapResult :: forall k a. (HasCallStack, Typeable a) => QKey k a -> QMap -> Result a
+lookupQMapResult :: forall k a. (HasCallStack, Typeable a, Typeable k) => QKey k a -> QMap -> Result' (k,a) a
 lookupQMapResult (QKey qid) qmap = do
    case qmap.unQMap !!! qid of
-     ResultEntry {resultReader=resultReader}
-       | Just o <- cast (fmap snd resultReader) -> o
-       | otherwise -> error ("Illegal parer" <> show qid <> ", expected type " <> show (typeRep @_ @a undefined) <> ", got type ")
+     ResultEntry {resultReader=resultReader :: Result' (k',_) (_, a')}
+       | (Just Refl) <- (eqT @(a',k') @(a,k)) -> fmap snd resultReader
+       | otherwise -> error ("Illegal result " <> show qid <> ", expected type " <> show (typeRep @_ @a undefined) <> ", got type " <> show (typeRep @_ @a' undefined))
 lookupQMapGrouper :: forall a k r. (HasCallStack, Typeable r) => QKey k a -> QMap -> RowParser r
 lookupQMapGrouper (QKey qid) qmap = do
    case qmap.unQMap !!! qid of
      ResultEntry {resultReader=p}
        | Just o <- cast (fmap fst (interpParser p)) -> o
-       | otherwise -> error ("Illegal parer" <> show qid <> ", expected type " <> show (typeRep @_ @r undefined) <> ", got type " )
-lookupQMapUnparse :: forall k a. (HasCallStack, Typeable a) => QKey k a -> QMap -> UnParse a
+       | otherwise -> error ("Illegal grouper" <> show qid <> ", expected type " <> show (typeRep @_ @r undefined) <> ", got type " )
+lookupQMapUnparse :: forall k a. (HasCallStack, Typeable a, Typeable k) => QKey k a -> QMap -> UnParse (k,a)
 lookupQMapUnparse (QKey qid) qmap = do
    case qmap.unQMap !!! qid of
      ResultEntry {resultReader=p}
        | Just o <- cast (interpReparse p) -> o
-       | otherwise -> error ("Illegal parer" <> show qid <> ", expected type " <> show (typeRep @_ @a undefined) <> ", got type ")
+       | otherwise -> error ("Illegal unparser" <> show qid <> ", expected type " <> show (typeRep @_ @a undefined) <> ", got type ")
 
 toDeltaRoot :: Typeable a => [a] -> QMap -> [(Maybe RawRows, Maybe (a, UpdatedRows))]
 toDeltaRoot ls q = deltaRows () (QKey (QId 0)) q ls
@@ -825,7 +847,7 @@ deltaRows k (QKey qid) qmap as =
        (Just Refl, Just Refl) -> let
             (rowParser, groupVal, unParse, tuples) = (interpParser (fmap fst res), interpReparse (fmap fst res), interpPrinter utab res, interpTuple res)
             oldRows = M.fromList [(runRowParser rowParser qmap e, labelRow tuples utab e) | e <- V.toList (v !!! k) ]
-            newRows = M.fromList [ (groupVal a, (a, row)) | a <- as, let row = unParse a ]
+            newRows = M.fromList [ (groupVal (k,a), (a, row)) | a <- as, let row = unParse (k,a) ]
             merged = M.mergeWithKey (\_ old new -> Just (Just old, Just new)) (M.map (\x -> (Just x, Nothing))) (M.map (\x -> (Nothing, Just x))) oldRows newRows
         in M.elems merged
        _ -> error ("Illegal parer" <> show qid <> ", expected type " <> show (typeRep @_ @a undefined) <> ", got type " <> show (typeOf @a' undefined))
@@ -835,7 +857,7 @@ instance Semigroup RawRow where
     | t1 == t2 = RawRow t1 (M.unionWithKey (\k a b -> if a == b then a else error $ "Incompatible values set for same column, no single source of truth: " <> show (t1, k, a,b)) v1 v2)
     | otherwise = error "Illegal rawRow merge; the select source should uniquely determine the source table"
 labelRow :: SQL.Tuple -> M.Map Int UTable -> Row -> RawRows
-labelRow tuple umap row = UR $ M.fromListWith (<>) [ (qIdx, RawRow table (M.singleton col r)) | (t,r) <- zip tuple (V.toList row), Just (Col qIdx table col) <- [resolveColumn umap t] ]
+labelRow tuple umap row = UR $ M.fromListWith (<>) [ (qIdx, RawRow (UT.name' $ umap !!! qIdx) (M.singleton col r)) | (t,r) <- zip tuple (V.toList row), Just (Col qIdx col) <- [resolveColumn t] ]
 
 
 qmapType :: ResultEntry -> String
@@ -852,14 +874,14 @@ data ParserState = ParserState {
     curRow :: Row
 }
 
-loadNested :: (Monad m, ExecQuery m, Ord r, Typeable r, Typeable a) => QueryM SQL.Flat (Result' a (k, (r, a))) -> m QMap
+loadNested :: (Monad m, ExecQuery m, Ord r, Typeable r, Typeable a) => QueryM SQL.Flat (Result' a (r, a)) -> m QMap
 loadNested query = do
     (QS {qidGen = idx', updaters=upds},sql,res) <- pure $ runQueryM 1 query
     rows <- execQuery sql
     let v = V.fromList rows
     let deps = mconcat [DepMap (interpJoins row res) | row <- V.toList v]
     QMap out <- evalStateT (interpQueries deps res) idx'
-    pure $ QMap $ M.insert (QId 0 ) (ResultEntry (M.singleton () v) (fmap snd res) upds (tableMappings sql)) out
+    pure $ QMap $ M.insert (QId 0) (ResultEntry (M.singleton () v) (snd =. res) upds (tableMappings sql)) out
 
 runParserRoot :: (HasCallStack, Typeable a) => QMap -> [a]
 runParserRoot = runParserFor (QKey (QId 0)) ()
