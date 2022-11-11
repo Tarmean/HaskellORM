@@ -1,7 +1,5 @@
 {-# LANGUAGE QuasiQuotes, TemplateHaskell, MultiParamTypeClasses, FlexibleInstances, DeriveGeneric, DataKinds #-}
 {-# LANGUAGE NoFieldSelectors #-}
-{-# LANGUAGE DuplicateRecordFields #-}
-{-# OPTIONS_GHC -ddump-splices #-}
 module Entity.Entities where
 import TemplateHaskellDB(defineTable)
 $(defineTable "examples.db" "business")

@@ -20,6 +20,7 @@
 {-# HLINT ignore "Use record patterns" #-}
 {-# LANGUAGE PartialTypeSignatures #-}
 {-# OPTIONS_GHC -Wno-partial-type-signatures #-}
+{-# OPTIONS_GHC -fplugin=Data.Record.Anon.Plugin #-}
 module Classes where
 import GHC.Stack (HasCallStack)
 import Database.HDBC.Sqlite3 (connectSqlite3)
@@ -32,7 +33,9 @@ import Control.Monad.Reader
 
 import Database.Relational.OverloadedInstances ()
 import Entity.Customer ( Customer(..), customer )
-import Entity.Account ( Account(..), account, availBalance )
+-- import Entity.Branch ( Branch(..), branch )
+import Entity.Account ( Account(..), account )
+import Entity.Entities (Business(..), business)
 import qualified Database.Relational.SqlSyntax as SQL
 import qualified Database.Relational.Monad.Trans.Ordering as SQL
 import qualified Database.Relational.Monad.Trans.Restricting as SQL
@@ -150,6 +153,7 @@ execUpdate updater (Insert r) = (mconcat sql <> cols <> values <> returns, M.key
 -- UPDATE $table SET *$key=?, WHERE *$pkey=? {args <> primary_key_args}
 execUpdate updater (Update l r) 
   | M.intersection l.values  r.values /= r.values = (mconcat sql <> values <> whereClause, [], M.elems inSet.values <> M.elems inWhere.values)
+  | otherwise = (mempty, [], mempty)
   where
     sql = [Words.UPDATE, Words.word r.tableName, Words.SET]
     -- cols = sepByComma [k <> "= ?" | k <- M.keys 
@@ -163,7 +167,15 @@ execUpdate updater (Update l r)
     (inWhere, _) = splitRow updater r
 
     sepByComma = foldl1 (Words.|*|)
-execUpdate _ _ = (mempty, [], mempty)
+execUpdate updater (Delete r) = (mconcat sql <> whereClause, [], M.elems inFD.values)
+  where
+    sql = [Words.DELETE, Words.FROM, Words.word r.tableName]
+    whereClause = Words.WHERE <> tuple [fromString k <> "= ?" | k <- M.keys (inFD.values)]
+    parens a = "(" Words.<++> a Words.<++> ")"
+    tuple = parens . sepByComma
+    (_, inFD) = splitRow updater r
+
+    sepByComma = foldl1 (Words.|*|)
 
 critColumns :: MetaData -> S.Set String
 critColumns md = S.fromList [Words.wordShow col | (idx, col) <- zip [0..] cols, idx `elem` primIdxs]
@@ -199,13 +211,13 @@ instance Semigroup UpdatedRow where
 type QueryRef = SQL.Qualified Int
 data Updater = Updater {
     metaDatas :: M.Map String MetaData,
-    propagation :: [(Col, Col)],
-    parentPropagation :: [(Col, Col)]
+    propagation :: [(Col, String, Col)]
+    -- parentPropagation :: [(Col, Col)]
 } deriving Show
 instance Semigroup Updater where
-   (Updater a b x) <> (Updater c d y) = Updater (a <> c) (b <> d) (x <> y)
+   (Updater a x) <> (Updater c y) = Updater (a <> c) (x <> y)
 instance Monoid Updater where
-    mempty = Updater mempty mempty mempty
+    mempty = Updater mempty mempty
 
 thePrimaryKey :: forall a. CK.HasColumnConstraint CK.Primary a => [Int]
 thePrimaryKey = CK.indexes $  CK.derivedCompositePrimary @a
@@ -257,21 +269,21 @@ diffRow (Just (UR m)) (Just (_a, UR ms)) = out
     inner _ _ _  = Nothing
 
 
+primaryKey :: (a -> b) -> Result' x a -> Result' x (b,a)
+primaryKey f = fmap (\x -> (f x, x))
 
-testQ :: QueryM SQL.Flat (AResult Int (Account, [Customer]))
+testQ :: QueryM SQL.Flat (AResult Int (Account, Customer, [Business]))
 testQ = do
-    accQ <- SQL.query account
-    tellMetadata @Account
-    custQ <- mkJoin accQ.customer $ \aCust -> pure do
-       cust_id <- (\c -> c.custId) =. sel aCust.custId
-       c <- sel aCust
-       pure (cust_id, c)
-    SQL.wheres $ accQ.accountId SQL..=. SQL.value 500 -- accQ.availBalance SQL..>. SQL.value (Just (25000::Double))
+    accQ <- query account
+    custQ <- affine accQ.customer "MAIN.account"
+    bus <- collection custQ.business $ \b -> pure $ primaryKey (.custId) (sel b)
+    SQL.wheres $ accQ.availBalance SQL..>. SQL.value (Just (25000::Double))
     pure $ do
-        ac <- fst =. sel accQ
-        cust <- snd =. custQ
-        ac_id <- (\(a,_) -> a.accountId) =. sel accQ.accountId
-        pure (ac_id, (ac, cust))
+        ac <- (\(a,_,_) -> a) =. sel accQ
+        cust <- (\(_,a,_) -> a) =. sel custQ
+        ac_id <- (\(a,_,_) -> a.accountId) =. sel accQ.accountId
+        b <- (\(_,_,a)->a) =. bus
+        pure (ac_id, (ac, cust,b))
 
 class FundepHack a b c | a b -> c
 instance FundepHack a b c => FundepHack a b c
@@ -281,11 +293,16 @@ instance (FundepHack l b c, SQLP.PersistableWidth a, SQLOP.HasProjection l a b) 
     ormField r = r SQL.! SQLOP.projection @l undefined
 
 instance (x ~ JoinConfig Int Customer Singular) => ORMField "customer" Account x where
-    ormField r = JoinConfig {joinKeyR = #custId, joinTarget = customer, joinFinalizer = singular, joinOrigin = r.custId  }
+    ormField r = JoinConfig {joinKeyR = #custId, joinTarget = customer, joinFinalizer = singular, joinOrigin = r.custId, joinTable = "customer"  }
+
+instance (x ~ JoinConfig Int Business Singular) => ORMField "business" Customer x where
+    ormField r = JoinConfig {joinKeyR = #custId, joinTarget = business, joinFinalizer = singular, joinOrigin = r.custId, joinTable = "business"  }
 
 instance (CustomerField l b, FundepHack l Customer b, ORMField l Customer b) => HasField l (Record.Record SQL.Flat Customer) b where
     getField = ormField @l
 instance (AccountField l b, FundepHack l Account b, ORMField l Account b) => HasField l (Record.Record SQL.Flat Account) b where
+    getField = ormField @l
+instance (AccountField l b, FundepHack l Business b, ORMField l Business b) => HasField l (Record.Record SQL.Flat Business) b where
     getField = ormField @l
 class IsProj b
 instance (b ~ Record.Record SQL.Flat x) => IsProj b
@@ -295,7 +312,7 @@ type family AccountField (l :: Symbol) b where
    AccountField "customer"  b = IsRel b
    AccountField l b = IsProj b
 type family CustomerField (l :: Symbol) b where
-   -- CustomerField "customer"  b = IsRel b
+   CustomerField "business"  b = IsRel b
    CustomerField l b = IsProj b
 
 
@@ -326,11 +343,12 @@ data JoinConfig k b f
    = JoinConfig {
        joinKeyR :: SQL.Pi b k,
        joinTarget :: SQL.Relation () b,
+       joinTable :: String,
        joinFinalizer :: forall x. [x] -> TEval f x,
        joinOrigin :: Record.Record SQL.Flat k
    }
 
-mkJoin :: forall k b r f fd . (
+collection :: forall k b r f fd . (
     SQLV.FromSql HDBC.SqlValue k,
     SQLP.PersistableWidth k,
     SQLP.PersistableWidth b,
@@ -342,15 +360,28 @@ mkJoin :: forall k b r f fd . (
     Ord fd,
     Ord k, Record.ToSql HDBC.SqlValue k, CK.HasColumnConstraint CK.Primary b, Table.TableDerivable b
   ) => JoinConfig k b f -> (Record.Record SQL.Flat b -> QueryM SQL.Flat (Result' r (fd, r))) ->  QueryM SQL.Flat (Result' [r] [r])
-mkJoin cfg parse =
+collection cfg parse =
    nested (sel cfg.joinOrigin) $ \row -> do
-     tellMetadata @b
-     child <- SQL.query cfg.joinTarget 
-     let key = child SQL.!  cfg.joinKeyR 
-     tellParentDep cfg.joinOrigin key
+     child <- query cfg.joinTarget 
+     let key = child SQL.! cfg.joinKeyR 
      SQL.wheres (SQL.in' key (SQL.values row))
      res <- parse child
      pure $ liftA2 (,) (fst =. sel key) (snd =. res)
+
+query :: forall r. (CK.HasColumnConstraint CK.Primary r, Table.TableDerivable r) => SQL.Relation () r -> QueryM SQL.Flat (Record.Record SQL.Flat r)
+query s = do
+   tellMetadata @r
+   SQL.query s
+
+affine :: forall k b f. (SQLP.PersistableWidth b, CK.HasColumnConstraint CK.Primary b, Table.TableDerivable b) => JoinConfig k b f -> String -> QueryM SQL.Flat (Record.Record SQL.Flat b)
+affine cfg tabl = do
+     child <- query cfg.joinTarget
+     let key = child SQL.!  cfg.joinKeyR 
+     on (key SQL..=. cfg.joinOrigin)
+     tellDep key cfg.joinOrigin tabl
+     pure child
+     -- tableName :: SQL.Relation () b -> String
+     -- tableName (SQL.Table t) = T
 
 type UnParse r = r -> [(SQL.Column, SQLV.SqlValue)]
 
@@ -369,12 +400,14 @@ genQId = do
    put qs { qidGen = qs.qidGen  + 1 }
    pure $ QId qs.qidGen
 tellMetadata :: forall a m. (CK.HasColumnConstraint CK.Primary a, SQL.TableDerivable a) => QueryM m ()
-tellMetadata = modify $ \s -> s { updaters = Updater (M.singleton (UT.name' td.table) td) mempty mempty <> s.updaters }
+tellMetadata = modify $ \s -> s { updaters = Updater (M.singleton (UT.name' td.table) td) mempty <> s.updaters }
   where td = tableData @a
 
-tellParentDep :: Record.Record SQL.Flat a -> Record.Record SQL.Flat a -> QueryM m ()
-tellParentDep l r = do
-  modify $ \s -> s { updaters = s.updaters { parentPropagation = s.updaters.parentPropagation <> zip (map (fromJust . resolveColumn) $ Record.untype l) (map (fromJust . resolveColumn) $ Record.untype r) } }
+tellDep :: Record.Record SQL.Flat a -> Record.Record SQL.Flat a -> String -> QueryM m ()
+tellDep l r table = modify $ \s -> s { updaters = s.updaters { propagation = s.updaters.propagation <> newCols } }
+  where
+     toCols = map (fromJust . resolveColumn) . Record.untype
+     newCols = [ (l', table, r') | (l', r')  <- zip (toCols l) (toCols r) ]
    
 
 
@@ -433,11 +466,11 @@ runQueryM id0 (QueryM q) = out
     out = SQL.configureQuery (toSubQuery ns) SQL.defaultConfig
 
 
-runUpdate :: forall a k m. (ExecQuery m, Typeable a, Typeable k) => k -> QKey k a -> QMap -> [a] -> m ()
+runUpdate :: forall a k m. (MonadIO m, ExecQuery m, Typeable a, Typeable k) => k -> QKey k a -> QMap -> [a] -> m ()
 runUpdate k qk qm as = do
     let deltas = deltaRows k qk qm as
     execChanges k deltas qk qm
-runInsert :: forall a k m. (ExecQuery m, Typeable a, Typeable k) => k -> QKey k a -> QMap -> [a] -> m ()
+runInsert :: forall a k m. (MonadIO m, ExecQuery m, Typeable a, Typeable k) => k -> QKey k a -> QMap -> [a] -> m ()
 runInsert k qk qm as = do
     let
        unparse :: (k,a) -> UpdatedRows
@@ -458,7 +491,7 @@ addContext raw upd = UR (M.merge M.dropMissing M.preserveMissing (M.zipWithMatch
 
 insertedRows :: UpdatedRows -> RawRows
 insertedRows (UR m) = UR $ M.mapMaybe id m
-execChanges :: forall a k m. (ExecQuery m, Typeable a, Typeable k) => k -> [(Maybe RawRows, Maybe (a, UpdatedRows))] -> QKey k a -> QMap -> m ()
+execChanges :: forall a k m. (MonadIO m, ExecQuery m, Typeable a, Typeable k) => k -> [(Maybe RawRows, Maybe (a, UpdatedRows))] -> QKey k a -> QMap -> m ()
 execChanges k deltas qk qm = mapM_ (uncurry sqls) deltas
   where
     upd = lookupQMapUpdater qk qm
@@ -466,11 +499,12 @@ execChanges k deltas qk qm = mapM_ (uncurry sqls) deltas
     isDelete _ = False
     sqls :: Maybe RawRows -> Maybe (a, UpdatedRows) -> m (M.Map Int RawRow)
     sqls old new = flip execStateT mempty do
+        put mempty
         let a0 = diffRow old new
         let (lhs, rhs) = List.partition (isDelete . snd) (M.toList a0)
         traverse_ go (reverse rhs)
-        deps0 <- get
-        let deps = propagateUpdate upd mempty deps0 
+        deps <- get
+        liftIO $ putStrLn $  "deps0: " <> show deps
         case (old, new) of
           (Just row, Just (val, _)) -> lift (processChildren @m k (addUpdates (coerce deps) row) val qk qm)
           (Nothing, Just (val, rowm)) -> lift (insertChildren @m k (addUpdates (coerce deps) (insertedRows rowm)) val qk qm)
@@ -482,8 +516,10 @@ execChanges k deltas qk qm = mapM_ (uncurry sqls) deltas
       -- error ("MODIFICATION: " <> Words.wordShow kw <> ", " <> show args)
       out <- execRawQuery (Words.wordShow kw) args
       case out of
-        [a] -> 
-          put $ propagateSelf upd $ M.insertWith (<>) idx (RawRow (UT.name' $ lookupQMapTable qk qm idx) (M.fromList $ zip cols a)) overlay
+        [a] ->  do
+          let overlay' = propagateSelf upd $ M.insertWith (<>) idx (RawRow (UT.name' $ lookupQMapTable qk qm idx) (M.fromList $ zip cols a)) overlay
+          liftIO $ putStrLn $  "deps0: " <> show (overlay,upd,  overlay')
+          put overlay'
         [] -> pure ()
         _ -> error "runUpdate: too many rows"
 
@@ -493,29 +529,27 @@ execChanges k deltas qk qm = mapM_ (uncurry sqls) deltas
 propagateSelf :: Updater -> M.Map Int RawRow -> M.Map Int RawRow
 propagateSelf up inp = foldr step inp up.propagation
   where
-    step :: (Col, Col) -> M.Map Int RawRow -> M.Map Int RawRow
-    step (l, r) m = case lookupCol l m of
+    step :: (Col, String, Col) -> M.Map Int RawRow -> M.Map Int RawRow
+    step (l, s, r) m = case lookupCol l m of
       Nothing -> m
-      Just v -> setCol r v m
+      Just v -> setCol s r v m
     lookupCol :: Col -> M.Map Int RawRow -> Maybe HDBC.SqlValue
     lookupCol col m = M.lookup col.idx m >>= M.lookup col.name . (.values)
-    setCol :: Col -> HDBC.SqlValue -> M.Map Int RawRow -> M.Map Int RawRow
-    setCol col val = M.insertWith (<>) col.idx (RawRow (tableName col.idx) (M.singleton col.name val))
-    tableName :: Int -> String
-    tableName idx = (inp !!! idx).tableName
-propagateUpdate :: Updater -> M.Map Int RawRow -> M.Map Int RawRow -> M.Map Int RawRow
-propagateUpdate up parent inp = foldr step inp up.propagation
-  where
-    step :: (Col, Col) -> M.Map Int RawRow -> M.Map Int RawRow
-    step (l, r) m = case lookupCol l of
-      Nothing -> m
-      Just v -> setCol r v m
-    lookupCol :: Col -> Maybe HDBC.SqlValue
-    lookupCol col = M.lookup col.idx parent >>= M.lookup col.name . (.values)
-    setCol :: Col -> HDBC.SqlValue -> M.Map Int RawRow -> M.Map Int RawRow
-    setCol col val = M.insertWith (<>) col.idx (RawRow (tableName col.idx) (M.singleton col.name val))
-    tableName :: Int -> String
-    tableName idx = (inp !!! idx).tableName
+    setCol :: String -> Col -> HDBC.SqlValue -> M.Map Int RawRow -> M.Map Int RawRow
+    setCol table col val = M.insertWith (<>) col.idx (RawRow table (M.singleton col.name val))
+-- propagateUpdate :: Updater -> M.Map Int RawRow -> M.Map Int RawRow -> M.Map Int RawRow
+-- propagateUpdate up parent inp = foldr step inp up.propagation
+--   where
+--     step :: (Col, Col) -> M.Map Int RawRow -> M.Map Int RawRow
+--     step (l, r) m = case lookupCol l of
+--       Nothing -> m
+--       Just v -> setCol r v m
+--     lookupCol :: Col -> Maybe HDBC.SqlValue
+--     lookupCol col = M.lookup col.idx parent >>= M.lookup col.name . (.values)
+--     setCol :: Col -> HDBC.SqlValue -> M.Map Int RawRow -> M.Map Int RawRow
+--     setCol col val = M.insertWith (<>) col.idx (RawRow (tableName col.idx) (M.singleton col.name val))
+--     tableName :: Int -> String
+--     tableName idx = (inp !!! idx).tableName
 
 applyOver :: M.Map String HDBC.SqlValue -> Step -> Step
 applyOver m (Insert r) = Insert (r { values = M.union m r.values })
@@ -523,7 +557,7 @@ applyOver m (Update l r) = Update l (r { values = M.union m r.values })
 applyOver _ d@Delete{} = d
     
 -- FIXME: the newly generated ID's currently aren'T propagated
-insertChildren :: (ExecQuery m, Typeable a, Typeable k) => k -> RawRows -> a -> QKey k a -> QMap -> m ()
+insertChildren :: (MonadIO m, ExecQuery m, Typeable a, Typeable k) => k -> RawRows -> a -> QKey k a -> QMap -> m ()
 insertChildren k ctx a qk qm = traverse_ (uncurry step) (M.toList children)
   where
     result = lookupQMapResult qk qm
@@ -536,7 +570,7 @@ insertChildren k ctx a qk qm = traverse_ (uncurry step) (M.toList children)
         , Just k' <- fromDynamic @k' (deps !!! qid)
         -> runInsert k' (QKey qid) qm as'
       _ -> error "Illegal step"
-processChildren :: forall m k a. (ExecQuery m, Typeable a, Typeable k) => k -> RawRows -> a -> QKey k a -> QMap -> m ()
+processChildren :: forall m k a. (MonadIO m, ExecQuery m, Typeable a, Typeable k) => k -> RawRows -> a -> QKey k a -> QMap -> m ()
 processChildren k row a qk qm = traverse_ (uncurry step) (M.toList children)
   where
     result = lookupQMapResult qk qm
@@ -551,18 +585,30 @@ processChildren k row a qk qm = traverse_ (uncurry step) (M.toList children)
 
 today :: IO Day
 today = utctDay <$> getCurrentTime
-runTestQ :: IO [(Account, [Customer])]
+runTestQ :: IO [(Account, Customer, [Business])]
 runTestQ = do
     conn <- connectSqlite3 "examples.db"
     (qmap,a) <- runReaderT (runAQuery testQ) conn
     date <- today
-    let -- out = concatMap M.elems (uncurry diffRow <$> toDeltaRoot (fmap (\(x,y) -> (x{availBalance=fmap(+1) x.availBalance},y)) a) qmap)
-        upd = lookupQMapUpdater (QKey $ QId 0) qmap 
-    flip runReaderT conn $ runInsert () (QKey (QId 0)) qmap [(Account 500 "ACTIVE" 2 date Nothing Nothing "ACTIVE" Nothing Nothing Nothing Nothing, [Customer 999 "999-44-5555" "I" (Just "Home sweet home home") Nothing Nothing Nothing]::[Customer])]
-    (qmap,a) <- runReaderT (runAQuery testQ) conn
+    -- let -- out = concatMap M.elems (uncurry diffRow <$> toDeltaRoot (fmap (\(x,y) -> (x{availBalance=fmap(+1) x.availBalance},y)) a) qmap)
+        -- upd = lookupQMapUpdater (QKey $ QId 0) qmap 
+    -- flip runReaderT conn $ runInsert () (QKey (QId 0)) qmap [(Account 500 "ACTIVE" 2 date Nothing Nothing "ACTIVE" Nothing Nothing Nothing Nothing, Customer 999 "999-44-5555" "I" (Just "Home sweet home home") Nothing Nothing Nothing::Customer, [] @Business)]
+    -- (qmap,a) <- runReaderT (runAQuery testQ) conn
     -- pure []
     HDBC.rollback conn
     pure a
+
+-- >>> runTestQ
+-- GHC.ByteCode.Linker.lookupCE
+-- During interactive linking, GHCi couldn't find the following symbol:
+--   EntityziCustomer_zdselZCcustIdZCCustomer_closure
+-- This may be due to you not asking GHCi to load extra object files,
+-- archives or DLLs needed by your current session.  Restart GHCi, specifying
+-- the missing library using the -L/path/to/object/dir and -lmissinglibname
+-- flags, or simply by naming the relevant files on the GHCi command line.
+-- Alternatively, this link failure might indicate a bug in GHCi.
+-- If you suspect the latter, please report this as a GHC bug:
+--   https://www.haskell.org/ghc/reportabug
 
 singular :: [a] -> a
 singular [a] = a
@@ -673,10 +719,10 @@ data SomeQuery = forall k a r.  (Typeable k, Typeable r, Typeable a) => SomeQuer
 
 interpQueries :: ExecQuery m => DepMap -> Result' x a -> StateT Int m QMap
 interpQueries dm = Monoid.getAp . runAp_ (\case
-    NestedQ  {nestedKey = qid, nestedQuery = query } -> Monoid.Ap $ do
+    NestedQ  {nestedKey = qid, nestedQuery = innerQuery } -> Monoid.Ap $ do
        let dat = getDep qid dm
        idx <- get
-       (QS {qidGen = idx', updaters=updates},sql, res) <- pure $ runQueryM idx (query dat)
+       (QS {qidGen = idx', updaters=updates},sql, res) <- pure $ runQueryM idx (innerQuery dat)
        put idx'
        outv <- execQuery sql
        let joins = DepMap $ foldr (M.unionWith (<>)) M.empty [interpJoins vec res | vec <- outv]
@@ -746,14 +792,14 @@ class Monad m => ExecQuery m where
 instance (HDBC.IConnection conn) => ExecQuery (ReaderT conn IO) where
     execQuery q = do
         conn <- ask
-        out <- liftIO $ SQLV.runQuery conn query ()
-        liftIO $ print (query, out)
+        out <- liftIO $ SQLV.runQuery conn sqlQuery ()
+        liftIO $ print (sqlQuery, out)
         pure out
       where
         rel :: SQL.Relation () Row
         rel = SQL.unsafeTypeRelation (pure q)
-        query :: Rel.Query () Row
-        query = Rel.relationalQuery_ SQL.defaultConfig{SQL.schemaNameMode = SQL.SchemaNotQualified} rel  []
+        sqlQuery :: Rel.Query () Row
+        sqlQuery = Rel.relationalQuery_ SQL.defaultConfig{SQL.schemaNameMode = SQL.SchemaNotQualified} rel  []
     execRawQuery s args = do
         conn <- ask
         out <- liftIO $ HDBC.quickQuery' conn s args
@@ -855,7 +901,7 @@ deltaRows k (QKey qid) qmap as =
 instance Semigroup RawRow where
   RawRow t1 v1 <> RawRow t2 v2 
     | t1 == t2 = RawRow t1 (M.unionWithKey (\k a b -> if a == b then a else error $ "Incompatible values set for same column, no single source of truth: " <> show (t1, k, a,b)) v1 v2)
-    | otherwise = error "Illegal rawRow merge; the select source should uniquely determine the source table"
+    | otherwise = error ("Illegal rawRow merge; the select source should uniquely determine the source table" <> show (t1, v1, t2, v2))
 labelRow :: SQL.Tuple -> M.Map Int UTable -> Row -> RawRows
 labelRow tuple umap row = UR $ M.fromListWith (<>) [ (qIdx, RawRow (UT.name' $ umap !!! qIdx) (M.singleton col r)) | (t,r) <- zip tuple (V.toList row), Just (Col qIdx col) <- [resolveColumn t] ]
 
@@ -875,8 +921,8 @@ data ParserState = ParserState {
 }
 
 loadNested :: (Monad m, ExecQuery m, Ord r, Typeable r, Typeable a) => QueryM SQL.Flat (Result' a (r, a)) -> m QMap
-loadNested query = do
-    (QS {qidGen = idx', updaters=upds},sql,res) <- pure $ runQueryM 1 query
+loadNested queryM = do
+    let (QS {qidGen = idx', updaters=upds},sql,res) = runQueryM 1 queryM
     rows <- execQuery sql
     let v = V.fromList rows
     let deps = mconcat [DepMap (interpJoins row res) | row <- V.toList v]

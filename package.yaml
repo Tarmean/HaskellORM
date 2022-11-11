@@ -48,6 +48,8 @@ library:
   - sql-words
   - large-anon
   - time
+  - record-dot-preprocessor
+  - record-hasfield
   source-dirs: library
 
 executables:
