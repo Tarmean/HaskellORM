@@ -21,6 +21,7 @@
 {-# LANGUAGE PartialTypeSignatures #-}
 {-# OPTIONS_GHC -Wno-partial-type-signatures #-}
 {-# OPTIONS_GHC -fplugin=Data.Record.Anon.Plugin #-}
+{-# LANGUAGE DefaultSignatures #-}
 module Classes where
 import GHC.Stack (HasCallStack)
 import Database.HDBC.Sqlite3 (connectSqlite3)
@@ -77,10 +78,22 @@ import Data.Time.Calendar (Day)
 import Data.Time (utctDay)
 import Data.Time.Clock (getCurrentTime)
 import Data.Coerce (coerce)
+import qualified Database.Relational.Monad.Trans.Join as SQL
 data UpdateStep = UpsertNow (IO [(SQL.StringSQL, SQLV.SqlValue)]) | DeleteLater (IO ())
 data Step = Insert RawRow | Delete RawRow | Update RawRow RawRow
   deriving Show
 
+class Monad m => GenQualify m where
+    qualify :: a -> m (SQL.Qualified a)
+    default qualify :: (MonadTrans t, GenQualify m', m ~ t m') => a -> m (SQL.Qualified a)
+    qualify = lift . qualify
+instance GenQualify SQL.ConfigureQuery where
+    qualify = SQL.qualifyQuery
+deriving newtype instance GenQualify (QueryM m)
+instance GenQualify m => GenQualify (StateT s m)
+instance GenQualify m => GenQualify (SQL.Orderings s m)
+instance GenQualify m => GenQualify (SQL.Restrictings s m)
+instance GenQualify m => GenQualify (SQL.QueryJoin m)
 -- data Lang = ForLoop Ident Expr (Lang)
 -- data Lang = NonEmpty (Ident, Expr)
 -- -- for each row give me the minimum of all preceding rows
@@ -394,7 +407,7 @@ nested parentKey cb = do
    pure $ liftAp $ NestedQ {
         keyParser=parentKey,
         nestedKey = QKey qid,
-        nestedQuery = cb
+        nestedQuery = toRecursive . cb
         }
 
 genQId :: QueryM m QId
@@ -442,7 +455,7 @@ decideUpdatesDefault tups m vals = UR $ M.fromListWith (<>) $ do
         table = UT.name' (m !!! i)
     pure (i, Just $ RawRow table (M.singleton col val))
 
-newtype WithRecursive f a = WithRecursive { un :: WriterT [SQL.ConfigureQuery (SQL.Qualified SQL.SubQuery)] (QueryM f) a }
+newtype WithRecursive f a = WithRecursive { recs :: WriterT [SQL.Qualified SQL.SubQuery] (QueryM f) a }
   deriving newtype (Functor, Applicative, Monad, MonadState QueryState)
 
 toRecursive :: QueryM f a -> WithRecursive f a
@@ -474,13 +487,17 @@ runQueryM' id0 (QueryM q) = toSubQuery ns
       (res,queryState) <- ms
       pure (queryState,res)
 runQueryM :: forall n a. Int -> QueryM SQL.Flat (Result' n a) -> (QueryState, SQL.SubQuery, Result' n a)
-runQueryM id0 (QueryM q) = out 
-  where
-    ms = runStateT q (QS id0 mempty mempty)
-    ns = do
-      (res,queryState) <- ms
-      pure (queryState,res)
-    out = SQL.configureQuery (toSubQuery ns) SQL.defaultConfig
+runQueryM id0 q = SQL.configureQuery (runQueryM' id0 q ) SQL.defaultConfig
+
+runRecQueryM :: forall n a. Int -> WithRecursive SQL.Flat (Result' n a) -> (QueryState, [SQL.Qualified SQL.SubQuery], SQL.SubQuery, Result' n a)
+runRecQueryM id0 (WithRecursive (WriterT (QueryM q))) = flip SQL.configureQuery SQL.defaultConfig $ do
+    let
+        ns = do
+          ((res, sq),queryState) <- runStateT q (QS id0 mempty mempty)
+          pure ((sq, queryState),res)
+    ((rec, queryState),sq,res) <- toSubQuery ns 
+    pure (queryState, rec, sq, res)
+
 withQueryM :: QueryM SQL.Flat (Result' n o) -> QueryM SQL.Flat (SQL.SubQuery, Result' n o)
 withQueryM q = do
   s <- get
@@ -496,8 +513,6 @@ unionE l r = do
    (sr, vr) <- withQueryM r
    undefined
 
--- todo: recursive queries
--- Recursive must wrap QueryM, modify the generated sql
 
 
 runUpdate :: forall a k m. (MonadIO m, ExecQuery m, Typeable a, Typeable k) => k -> QKey k a -> QMap -> [a] -> m ()
@@ -705,7 +720,7 @@ data ResultF x a where
     NestedQ :: (Typeable r, Ord r, Show k, Ord k, Typeable k, Typeable a) => 
       {  keyParser :: Ap ResultF k k, -- ^ lookup join key for the parent
          nestedKey :: QKey k a,
-         nestedQuery :: [k] -> QueryM SQL.Flat (Ap ResultF (k,a) (k, (r, a)))
+         nestedQuery :: [k] -> WithRecursive SQL.Flat (Ap ResultF (k,a) (k, (r, a)))
       } -> ResultF [a] [a]
     ParseQ :: { cols :: SQL.Tuple, colPrinter ::  M.Map Int UTable -> a -> UpdatedRows , colParser :: RowParser a } -> ResultF a a
     -- UpdateQ :: {
@@ -756,9 +771,9 @@ interpQueries dm = Monoid.getAp . runAp_ (\case
     NestedQ  {nestedKey = qid, nestedQuery = innerQuery } -> Monoid.Ap $ do
        let dat = getDep qid dm
        idx <- get
-       (QS {qidGen = idx', updaters=updates},sql, res) <- pure $ runQueryM idx (innerQuery dat)
+       (QS {qidGen = idx', updaters=updates},recs, sql, res) <- pure $ runRecQueryM idx (innerQuery dat)
        put idx'
-       outv <- execQuery sql
+       outv <- execQueryRec recs sql
        let joins = DepMap $ foldr (M.unionWith (<>)) M.empty [interpJoins vec res | vec <- outv]
        QMap inner <- interpQueries joins res
        let childKey = interpParser (fmap fst res)
@@ -822,6 +837,7 @@ instance SQLV.FromSql SQLV.SqlValue Row where
 
 class Monad m => ExecQuery m where
     execQuery :: SQL.SubQuery -> m [Row]
+    execQueryRec :: [SQL.Qualified SQL.SubQuery] -> SQL.SubQuery -> m [Row]
     execRawQuery :: String -> [SQLV.SqlValue] -> m [[SQLV.SqlValue]]
 instance (HDBC.IConnection conn) => ExecQuery (ReaderT conn IO) where
     execQuery q = do
@@ -834,13 +850,33 @@ instance (HDBC.IConnection conn) => ExecQuery (ReaderT conn IO) where
         rel = SQL.unsafeTypeRelation (pure q)
         sqlQuery :: Rel.Query () Row
         sqlQuery = Rel.relationalQuery_ SQL.defaultConfig{SQL.schemaNameMode = SQL.SchemaNotQualified} rel  []
+    execQueryRec rec q = do
+        conn <- ask
+        -- out <- liftIO $ SQLV.runQuery conn sqlQuery ()
+        let s = mkWith rec <> show sqlQuery
+        out <- liftIO $ HDBC.quickQuery' conn s []
+        liftIO $ print (sqlQuery, out)
+        pure (V.fromList <$> out)
+      where
+        rel :: SQL.Relation () Row
+        rel = SQL.unsafeTypeRelation (pure q)
+        sqlQuery :: Rel.Query () Row
+        sqlQuery = Rel.relationalQuery_ SQL.defaultConfig{SQL.schemaNameMode = SQL.SchemaNotQualified} rel  []
     execRawQuery s args = do
         conn <- ask
         out <- liftIO $ HDBC.quickQuery' conn s args
         liftIO $ putStrLn $ "execRawQuery: " <> show (s,args, out)
         pure out
+
+mkWith :: [SQL.Qualified SQL.SubQuery] -> String
+mkWith [] = ""
+mkWith ls = "WITH " <> List.intercalate ",\n" (map mkOne ls) <> "\n "
+  where
+    mkOne (SQL.Qualified name q) = show name <> " AS (\n" <> show q <> "\n)"
+  
 instance (Monad m, ExecQuery m) => ExecQuery (StateT s m) where
     execQuery = lift . execQuery
+    execQueryRec a = lift . execQueryRec a
     execRawQuery str args = lift (execRawQuery str args)
 
 mkGrouping :: (Ord k) => RowParser k -> [Row] -> M.Map k (V.Vector Row)
