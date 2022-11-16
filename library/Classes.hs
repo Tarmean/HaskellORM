@@ -126,7 +126,10 @@ data Step = Insert RawRow | Delete RawRow | Update RawRow RawRow
 --   (SELECT * FROM users WHERE parent_id = u.id)
 -- )
 -- SELECT * FROM u
-    
+
+
+-- unions :: QueryM (Result a) -> QueryM (Result b) -> QueryM (Result (Either a b))
+-- recursive :: (Record a -> QueryM (Record a)) -> (Result [r] -> Record a -> Result r)
 
 (!!!) :: (HasCallStack, Ord a) => M.Map a b -> a -> b
 m !!! k = case M.lookup k m of
@@ -439,8 +442,15 @@ decideUpdatesDefault tups m vals = UR $ M.fromListWith (<>) $ do
         table = UT.name' (m !!! i)
     pure (i, Just $ RawRow table (M.singleton col val))
 
+newtype WithRecursive f a = WithRecursive { un :: WriterT [SQL.ConfigureQuery (SQL.Qualified SQL.SubQuery)] (QueryM f) a }
+  deriving newtype (Functor, Applicative, Monad, MonadState QueryState)
+
+toRecursive :: QueryM f a -> WithRecursive f a
+toRecursive = WithRecursive . lift
+
 newtype QueryM f a = QueryM { unQueryM :: StateT QueryState QueryT a }
   deriving (Functor, Applicative, Monad, MonadState QueryState)
+
 instance MonadRestrict SQL.Flat (QueryM SQL.Flat) where
    restrict p = QueryM (lift $ SQL.restrict p)
 instance  MonadQualify SQL.ConfigureQuery (QueryM f) where
@@ -456,6 +466,13 @@ instance  MonadQuery (QueryM f) where
    queryMaybe' = QueryM . lift . queryMaybe'
 
 type M a = StateT QueryState QueryT a
+runQueryM' :: forall n a. Int -> QueryM SQL.Flat (Result' n a) -> SQL.ConfigureQuery (QueryState, SQL.SubQuery, Result' n a)
+runQueryM' id0 (QueryM q) = toSubQuery ns 
+  where
+    ms = runStateT q (QS id0 mempty mempty)
+    ns = do
+      (res,queryState) <- ms
+      pure (queryState,res)
 runQueryM :: forall n a. Int -> QueryM SQL.Flat (Result' n a) -> (QueryState, SQL.SubQuery, Result' n a)
 runQueryM id0 (QueryM q) = out 
   where
@@ -464,6 +481,23 @@ runQueryM id0 (QueryM q) = out
       (res,queryState) <- ms
       pure (queryState,res)
     out = SQL.configureQuery (toSubQuery ns) SQL.defaultConfig
+withQueryM :: QueryM SQL.Flat (Result' n o) -> QueryM SQL.Flat (SQL.SubQuery, Result' n o)
+withQueryM q = do
+  s <- get
+  let subQuery = do
+        (out,queryState) <- runStateT q.unQueryM s
+        pure (queryState,out)
+      (s', sq, res) = SQL.configureQuery (toSubQuery subQuery) SQL.defaultConfig
+  put s'
+  pure (sq, res)
+unionE :: forall a b. (Typeable a, Typeable b) => QueryM SQL.Flat (Result a) -> QueryM SQL.Flat (Result b) -> QueryM SQL.Flat (Result  (Either a b))
+unionE l r = do
+   (sl, vl) <- withQueryM l
+   (sr, vr) <- withQueryM r
+   undefined
+
+-- todo: recursive queries
+-- Recursive must wrap QueryM, modify the generated sql
 
 
 runUpdate :: forall a k m. (MonadIO m, ExecQuery m, Typeable a, Typeable k) => k -> QKey k a -> QMap -> [a] -> m ()
